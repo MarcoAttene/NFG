@@ -49,7 +49,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
 	endif()
 else()
 	# set max optimization
-	target_compile_options(${PROJECT_NAME} PUBLIC "-O3; -frounding-math")
+	target_compile_options(${PROJECT_NAME} PUBLIC -O3)
 	# grant IEEE 754 compliance
 	target_compile_options(${PROJECT_NAME} PUBLIC -frounding-math)
 	# set target architecture
