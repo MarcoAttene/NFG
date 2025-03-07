@@ -2111,7 +2111,7 @@ inline bignatural& bignatural::operator=(const bignatural& m) {
 	if (digits != m.digits) {
 		if (m_capacity >= m.m_size) {
 			m_size = m.m_size;
-			memcpy(digits, m.digits, m_size << 2);
+			if (m_size) memcpy(digits, m.digits, m_size << 2);
 		}
 		else {
 			BN_FREE(digits);
