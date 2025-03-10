@@ -2055,7 +2055,7 @@ inline void bignatural::init(const bignatural& m) {
 	m_capacity = m.m_capacity;
 	if (m_capacity) {
 		digits = (uint32_t*)BN_ALLOC(sizeof(uint32_t) * m_capacity);
-		memcpy(digits, m.digits, sizeof(uint32_t) * m_size);
+		if (m_size) memcpy(digits, m.digits, sizeof(uint32_t) * m_size);
 	}
 	else digits = NULL;
 }
@@ -2360,7 +2360,7 @@ inline bignatural bignatural::sqrt() const
 inline void bignatural::increaseCapacity(uint32_t new_capacity) {
 	m_capacity = new_capacity;
 	uint32_t* tmp_d = (uint32_t*)BN_ALLOC(sizeof(uint32_t) * m_capacity);
-	memcpy(tmp_d, digits, sizeof(uint32_t) * m_size);
+	if (m_size) memcpy(tmp_d, digits, sizeof(uint32_t) * m_size);
 	BN_FREE(digits);
 	digits = tmp_d;
 }
@@ -2370,7 +2370,7 @@ inline void bignatural::addOneMostSignificantDigit(uint32_t d) {
 	if (m_capacity == m_size) {
 		m_capacity++;
 		uint32_t* tmp_d = (uint32_t*)BN_ALLOC(sizeof(uint32_t) * m_capacity);
-		memcpy(tmp_d + 1, digits, sizeof(uint32_t) * m_size);
+		if (m_size) memcpy(tmp_d + 1, digits, sizeof(uint32_t) * m_size);
 		BN_FREE(digits);
 		digits = tmp_d;
 		digits[0] = d;
