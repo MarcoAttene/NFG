@@ -74,7 +74,8 @@
 #		define USE_SIMD_INSTRUCTIONS
 #		define USE_AVX2_INSTRUCTIONS
 #	endif
-#	ifdef SIMDE_ENABLE_NATIVE_ALIASES
+#	ifdef __ARM_NEON
+#		define SIMDE_ENABLE_NATIVE_ALIASES
 #		include <x86/avx2.h>
 #		include <x86/fma.h>
 #		define USE_SIMD_INSTRUCTIONS
@@ -296,9 +297,16 @@ public:
 	interval_number& operator*=(const double b);
 	interval_number& operator/=(const double b);
 
+#ifdef USE_AVX2_INSTRUCTIONS
+	interval_number fmadd(const interval_number& b, const interval_number& c) const;
+	interval_number fmsub(const interval_number& b, const interval_number& c) const;
+#endif
+
 	interval_number abs() const;
 	interval_number sqr() const;
 	interval_number pow(unsigned int e) const;
+	interval_number pow2() const;
+	interval_number pow3() const;
 	friend interval_number min(const interval_number& a, const interval_number& b);
 	friend interval_number max(const interval_number& a, const interval_number& b);
 
@@ -361,6 +369,9 @@ inline std::ostream& operator<<(std::ostream& os, const interval_number& p)
 	return os;
 }
 
+inline interval_number operator+(const double a, const interval_number& p) { return p + a; }
+inline interval_number operator-(const double a, const interval_number& p) { return -(p - a); }
+inline interval_number operator*(const double b, const interval_number& d) { return d * b; }
 
 /////////////////////////////////////////////////////////////////////
 // 	   
@@ -368,7 +379,7 @@ inline std::ostream& operator<<(std::ostream& os, const interval_number& p)
 // 
 /////////////////////////////////////////////////////////////////////
 
-// An instance of the following must be created to access functions for expansion arithmetic
+// Struct-like container to access functions for expansion arithmetic
 struct expansionObject
 {
 public:
@@ -465,6 +476,7 @@ public:
 	// Same as above, but 'h' is allocated internally. The caller must still call 'free' to release the memory.
 	static int Gen_Product_With_Alloc(const int alen, const double* a, const int blen, const double* b, double** h);
 
+	static int Gen_Square(const int alen, const double* a, double* h);
 
 	// Assume that *h is pre-allocated with hlen doubles.
 	// If more elements are required, *h is re-allocated internally.
@@ -488,6 +500,182 @@ public:
 	static void Two_Product_2Presplit(double a, double _ah, double _al, double b, double _bh, double _bl, double& x, double& y);
 #endif
 };
+
+
+//////////////////////////////////////////////////////////////////////////////////////////
+//
+// User-friendly interface for expansion arithmetic
+//
+//////////////////////////////////////////////////////////////////////////////////////////
+
+// Values of type double can be used to initialize numbers of type s_expansion.
+// Operations on s_expansion numbers produce expansion numbers that can be combined with
+// each other into polynomial expressions.
+//
+// All expansions are allocated within an 'expansionPool' object that can be stored in
+// the stack. Before using expansions within a scope, an object O of type expansionPool 
+// must be declared, and the function expansion::initPool(&O) must be called.
+//
+// Example:
+//
+// int dot2dSign(s_expansion px, s_expansion py, s_expansion qx, s_expansion qy) {
+//		expansionPool O;
+//		expansion::initPool(&O);
+//
+//		const expansion dx = px*qx;
+//		const expansion dy = qx*qy;
+//		const expansion dot = dx+dy;
+//		return sgn(dot);
+// }
+//
+// Note that the pool is unique for all the expansions! A call to initPool
+// resets all expansions in ANY scope.
+
+
+// Expansion pool - size can be changed as long as it leaves sufficient room
+// on the stack for all the other operations.
+
+#define EXPANSION_POOL_SIZE	16384
+
+struct expansionPool {
+	double pool[EXPANSION_POOL_SIZE];	// The pool
+	double* next;						// First free slot
+
+	void init() { next = pool; }
+	size_t size() const { return next - pool; }
+};
+
+
+// Generic expansion
+
+class expansion {
+	inline static thread_local expansionPool *pool;
+
+public:
+	double* els;	// Elements of the expansion
+	size_t len;		// Number of elements
+
+	expansion() { }
+
+	static void initPool(expansionPool* ep) { pool = ep; pool->init(); }
+	static size_t getPoolSize() { return pool->size(); }
+
+	expansion operator+(const expansion& e) const {
+		expansion r(pool->next);
+		assert(len + e.len + getPoolSize() < EXPANSION_POOL_SIZE);
+		r.resize(expansionObject::Gen_Sum((int)len, els, (int)e.len, e.els, r.els));
+		return r;
+	}
+
+	expansion operator-(const expansion& e) const {
+		expansion r(pool->next);
+		assert(len + e.len + getPoolSize() < EXPANSION_POOL_SIZE);
+		r.resize(expansionObject::Gen_Diff((int)len, els, (int)e.len, e.els, r.els));
+		return r;
+	}
+
+	expansion operator*(const expansion& e) const {
+		expansion r(pool->next);
+		assert(len * e.len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
+		r.resize(expansionObject::Gen_Product((int)len, els, (int)e.len, e.els, r.els));
+		return r;
+	}
+
+	expansion operator-(const double d) const {
+		expansion r(pool->next);
+		assert(len + 1 + getPoolSize() < EXPANSION_POOL_SIZE);
+		r.resize(expansionObject::Gen_Diff((int)len, els, 1, &d, r.els));
+		return r;
+	}
+
+	expansion operator*(const double& d) const {
+		expansion r(pool->next);
+		assert(len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
+		r.resize(expansionObject::Gen_Scale((int)len, els, d, r.els));
+		return r;
+	}
+
+	void operator=(const double d) {
+		assert(1 + getPoolSize() < EXPANSION_POOL_SIZE);
+		els = pool->next++;
+		len = 1;
+		*els = d;
+	}
+
+	expansion sqr() const {
+		expansion r(pool->next);
+		assert(len * len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
+		r.resize(expansionObject::Gen_Square((int)len, els, r.els));
+		return r;
+	}
+
+	double get_d() const { return els[len - 1]; }
+
+	void negate() { expansionObject::Gen_Invert((int)len, els); }
+
+protected:
+	expansion(double* pn) : els(pn) { }
+	expansion(size_t s) : els(pool->next), len(s) {
+		assert(s + getPoolSize() < EXPANSION_POOL_SIZE);
+		pool->next += s;
+	}
+
+	void resize(size_t l) {
+		assert(l + getPoolSize() < EXPANSION_POOL_SIZE);
+		len = l; pool->next += l;
+	}
+
+	friend class s_expansion;
+};
+
+inline std::ostream& operator<<(std::ostream& os, const expansion& p)
+{
+	for (size_t i = 0; i < p.len; i++) os << (i ? " " : "") << p.els[i];
+	return os;
+}
+
+inline int sgn(const expansion& e) {
+	const double d = e.get_d();
+	return (d > 0) - (d < 0);
+}
+
+class s_expansion {
+public:
+	double val;
+
+	s_expansion(const double d) : val(d) {}
+
+	expansion operator+(const s_expansion& e) const {
+		expansion r((uint64_t)2);
+		expansionObject::Two_Sum(val, e.val, r.els[1], r.els[0]);
+		return r;
+	}
+
+	expansion operator-(const s_expansion& e) const {
+		expansion r((uint64_t)2);
+		expansionObject::Two_Diff(val, e.val, r.els[1], r.els[0]);
+		return r;
+	}
+
+	expansion operator*(const s_expansion& e) const {
+		expansion r((uint64_t)2);
+		expansionObject::Two_Prod(val, e.val, r.els[1], r.els[0]);
+		return r;
+	}
+
+	expansion operator*(const expansion& e) const {
+		return e * (*this);
+	}
+
+	operator double() const { return val; }
+};
+
+inline expansion operator-(const double& d, const s_expansion& e) {
+	expansion r = e - s_expansion(d);
+	r.negate();
+	return r;
+}
+
 
 #ifdef USE_GNU_GMP_CLASSES
 typedef mpz_class bignatural;
@@ -777,6 +965,7 @@ public:
 	bigfloat operator*(const bigfloat& b) const;
 
 	// Comparison
+	bool operator==(const bigfloat& b) const;
 	bool operator!=(const bigfloat& b) const;
 
 	// Sign switch
@@ -1186,6 +1375,37 @@ inline interval_number interval_number::operator*(const interval_number& b) cons
 	// The first two vals of the 256 vector are the resulting product
 	return _mm256_castpd256_pd128(x3);
 }
+
+inline interval_number interval_number::fmadd(const interval_number& b, const interval_number& c) const
+{
+	// Fill i1 and i2 with two copies of 'this' and 'b' respectively
+	__m256d i1 = _mm256_castpd128_pd256(interval);
+	i1 = _mm256_insertf128_pd(i1, interval, 1);
+	__m256d i2 = _mm256_castpd128_pd256(b.interval);
+	i2 = _mm256_insertf128_pd(i2, b.interval, 1);
+	__m256d i3 = _mm256_castpd128_pd256(c.interval);
+	i3 = _mm256_permute4x64_pd(i3, 80);
+
+	// Swizzle and change sign appropriately to produce all the eight configs
+	__m256d x2 = _mm256_shuffle_pd(i1, i1, 5);
+	__m256d x3 = _mm256_xor_pd(i2, _mm256_set_pd(-0.0, -0.0, 0.0, 0.0));
+	__m256d x4 = _mm256_xor_pd(i2, _mm256_set_pd(0.0, 0.0, -0.0, -0.0));
+	x3 = _mm256_fmadd_pd(i1, x3, i3);
+	x2 = _mm256_fmadd_pd(x2, x4, i3);
+	x3 = _mm256_max_pd(x3, x2);
+	x4 = _mm256_shuffle_pd(x3, x3, 5);
+	x3 = _mm256_max_pd(x3, x4);
+	x3 = _mm256_permute4x64_pd(x3, 72);
+
+	// The first two vals of the 256 vector are the resulting product
+	return _mm256_castpd256_pd128(x3);
+}
+
+inline interval_number interval_number::fmsub(const interval_number& b, const interval_number& c) const
+{
+	return fmadd(b, c.inverse());
+}
+
 #else
 inline interval_number interval_number::operator*(const interval_number& b) const
 {
@@ -1301,6 +1521,20 @@ inline interval_number interval_number::pow(unsigned int e) const {
 
 	while (--e) ui = _mm_mul_pd(ui, uns);
 	return interval_number(ui);
+}
+
+
+inline interval_number interval_number::pow2() const {
+	__m128d u = _mm_and_pd(interval, sign_fabs_mask());
+	__m128d iu = _mm_shuffle_pd(u, u, 1);
+
+	if (_mm_comigt_sd(iu, u)) u = iu;
+	if (_mm_movemask_pd(interval) == 0) return _mm_and_pd(_mm_mul_pd(u, u), all_high_mask());
+	else return _mm_mul_pd(_mm_xor_pd(u, sign_low_mask()), u);
+}
+
+inline interval_number interval_number::pow3() const {
+	return _mm_mul_pd(interval, _mm_mul_pd(interval, interval));
 }
 
 #else // USE_SIMD_INSTRUCTIONS
@@ -1451,6 +1685,21 @@ inline interval_number interval_number::pow(unsigned int e) const {
 			return interval_number(_uml, _uh);
 		}
 	}
+}
+
+inline interval_number interval_number::pow2() const {
+	if (fabs(min_low) > fabs(high)) {
+		if (min_low < 0 || high < 0) return interval_number((-high) * (high), min_low * min_low);
+		else return interval_number(0, min_low * min_low);
+	}
+	else {
+		if (min_low < 0 || high < 0) return interval_number((-min_low) * (min_low), high * high);
+		else return interval_number(0, high * high);
+	}
+}
+
+inline interval_number interval_number::pow3() const {
+	return interval_number(min_low * min_low * min_low, high * high * high);
 }
 
 #endif // USE_SIMD_INSTRUCTIONS
@@ -1621,33 +1870,38 @@ inline void expansionObject::ExactScale(const int elen, double* e, const double 
 
 inline void expansionObject::print(const int elen, const double* e) { for (int i = 0; i < elen; i++) printf("%e ", e[i]); printf("\n"); }
 
-#ifdef USE_AVX2_INSTRUCTIONS
-inline void vfast_Two_Sum(__m128d a, __m128d b, __m128d& x, __m128d& y) {
-	x = _mm_add_sd(a, b);
-	y = _mm_sub_sd(b, _mm_sub_sd(x, a));
-}
-
-inline void vtwo_Sum(__m128d a, __m128d b, __m128d& x, __m128d& y) {
-	x = _mm_add_sd(a, b);
-	__m128d vbv = _mm_sub_sd(x, a);
-	y = _mm_add_sd(_mm_sub_sd(a, _mm_sub_sd(x, vbv)), _mm_sub_sd(b, vbv));
-}
-
-inline void vtwo_Prod(__m128d a, __m128d b, __m128d& x, __m128d& y) {
-	x = _mm_mul_sd(a, b);
-	y = _mm_fmsub_sd(a, b, x);
-}
-#endif
+//#ifdef USE_AVX2_INSTRUCTIONS
+//inline void vfast_Two_Sum(__m128d a, __m128d b, __m128d& x, __m128d& y) {
+//	x = _mm_add_sd(a, b);
+//	y = _mm_sub_sd(b, _mm_sub_sd(x, a));
+//}
+//
+//inline void vtwo_Sum(__m128d a, __m128d b, __m128d& x, __m128d& y) {
+//	x = _mm_add_sd(a, b);
+//	__m128d vbv = _mm_sub_sd(x, a);
+//	y = _mm_add_sd(_mm_sub_sd(a, _mm_sub_sd(x, vbv)), _mm_sub_sd(b, vbv));
+//}
+//
+//inline void vtwo_Prod(const __m128d& a, const __m128d& b, __m128d& x, __m128d& y) {
+//	x = _mm_mul_sd(a, b);
+//	y = _mm_fmsub_sd(a, b, x);
+//}
+//#endif
 
 inline void expansionObject::Two_Prod(const double a, const double b, double& x, double& y)
 {
 #ifdef USE_AVX2_INSTRUCTIONS
-	__m128d x1, x2, x3;
-	x1 = _mm_set_sd(a);
-	x2 = _mm_set_sd(b);
-	vtwo_Prod(x1, x2, x3, x2);
-	x = _mm_cvtsd_f64(x3);
-	y = _mm_cvtsd_f64(x2);
+	const __m128d av = _mm_load_sd(&a);
+	const __m128d bv = _mm_load_sd(&b);
+	const __m128d xv = _mm_mul_sd(av, bv);
+	y = _mm_cvtsd_f64(_mm_fmsub_sd(av, bv, xv));
+	x = _mm_cvtsd_f64(xv);
+	//__m128d x1, x2, x3;
+	//x1 = _mm_set_sd(a);
+	//x2 = _mm_set_sd(b);
+	//vtwo_Prod(x1, x2, x3, x2);
+	//x = _mm_cvtsd_f64(x3);
+	//y = _mm_cvtsd_f64(x2);
 #else
 	double _ah, _al, _bh, _bl;
 	x = a * b;
@@ -1659,11 +1913,15 @@ inline void expansionObject::Two_Prod(const double a, const double b, double& x,
 inline void expansionObject::Square(const double a, double& x, double& y)
 {
 #ifdef USE_AVX2_INSTRUCTIONS
-	__m128d x1, x2, x3;
-	x1 = _mm_set_sd(a);
-	vtwo_Prod(x1, x1, x3, x2);
-	x = _mm_cvtsd_f64(x3);
-	y = _mm_cvtsd_f64(x2);
+	const __m128d av = _mm_load_sd(&a);
+	const __m128d xv = _mm_mul_sd(av, av);
+	y = _mm_cvtsd_f64(_mm_fmsub_sd(av, av, xv));
+	x = _mm_cvtsd_f64(xv);
+	//__m128d x1, x2, x3;
+	//x1 = _mm_set_sd(a);
+	//vtwo_Prod(x1, x1, x3, x2);
+	//x = _mm_cvtsd_f64(x3);
+	//y = _mm_cvtsd_f64(x2);
 #else
 	double _ah, _al;
 	x = a * a;
@@ -1893,6 +2151,41 @@ inline int expansionObject::Gen_Product(const int alen, const double* a, const i
 	else return Sub_product(blen, b, alen, a, h);
 }
 
+
+inline int expansionObject::Gen_Square(const int alen, const double* a, double* h)
+{
+	// This might (and should!) be optimized
+	if (alen == 1) {
+		Square(*a, h);
+		return 2;
+	}
+	
+	if (alen == 2) {
+		Two_Square(a, h);
+		return 6;
+	}
+
+	int partial = 2 * alen * alen;
+	int allmem = 2 * (partial + alen);
+	double ph1_p[1024];
+	double* ph1 = (allmem > 1024) ? (AllocDoubles(allmem)) : (ph1_p);
+	double* ph2 = ph1 + partial;
+	double* th = ph2 + partial;
+	double* ph[2] = { ph1, ph2 };
+	int first = 0;
+	int phl = Gen_Scale(alen, a, a[0], ph[0]);
+
+	for (int i = 1; i < alen; i++)
+	{
+		int thl = Gen_Scale(alen, a, a[i], th);
+		first = i & 1;
+		phl = Gen_Sum(phl, ph[(i + 1) & 1], thl, th, ph[first]);
+	}
+	if (first) for (int i = 0; i < phl; i++) h[i] = ph2[i];
+	else for (int i = 0; i < phl; i++) h[i] = ph1[i];
+	if (allmem > 1024) FreeDoubles(ph1);
+	return phl;
+}
 
 inline double expansionObject::To_Double(const int elen, const double* e)
 {
@@ -2185,14 +2478,14 @@ inline void bignatural::operator>>=(uint32_t n) {
 inline bool bignatural::operator==(const bignatural& b) const {
 	if (size() != b.size()) return false;
 	auto dp = digits, de = digits + m_size, db = b.digits;
-	while (dp != de && *dp == *db) { dp++; db++; }
+	while (dp != de && *dp++ == *db++);
 	return (dp == de);
 }
 
 inline bool bignatural::operator!=(const bignatural& b) const {
 	if (size() != b.size()) return true;
 	auto dp = digits, de = digits + m_size, db = b.digits;
-	while (dp != de && *dp == *db) { dp++; db++; }
+	while (dp != de && *dp++ == *db++);
 	return (dp != de);
 }
 
@@ -2669,6 +2962,8 @@ inline bigfloat::bigfloat(const bignatural& m, int32_t e, int32_t s) : mantissa(
 inline int32_t bigfloat::log2() const { return exponent + ((int32_t)mantissa.getNumSignificantBits()) - 1; }
 
 inline void bigfloat::increaseMantissa() { mantissa += 1U; pack(); }
+
+inline bool bigfloat::operator==(const bigfloat& b) const { return (operator-(b).sign == 0); }
 
 inline bool bigfloat::operator!=(const bigfloat& b) const { return (operator-(b).sign != 0); }
 
