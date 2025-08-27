@@ -1611,15 +1611,13 @@ inline interval_number interval_number::pow(unsigned int e) const {
 }
 
 inline interval_number interval_number::pow2() const {
-	const double _fm = min_low * min_low, _fM = high * high;
-
-	if (_fm > _fM) {
-		if (min_low < 0 || high < 0) return interval_number(-_fM, _fm);
-		else return interval_number(0, _fm);
+	if (fabs(min_low) > fabs(high)) {
+		if (min_low < 0 || high < 0) return interval_number((-high) * (high), min_low * min_low);
+		else return interval_number(0, min_low * min_low);
 	}
 	else {
-		if (min_low < 0 || high < 0) return interval_number(-_fm, _fM);
-		else return interval_number(0, _fM);
+		if (min_low < 0 || high < 0) return interval_number((-min_low) * (min_low), high * high);
+		else return interval_number(0, high * high);
 	}
 }
 
