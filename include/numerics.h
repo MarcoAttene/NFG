@@ -547,7 +547,6 @@ struct expansionPool {
 
 
 // Generic expansion
-
 class expansion {
 	inline static thread_local expansionPool *pool;
 
@@ -560,54 +559,15 @@ public:
 	static void initPool(expansionPool* ep) { pool = ep; pool->init(); }
 	static size_t getPoolSize() { return pool->size(); }
 
-	expansion operator+(const expansion& e) const {
-		expansion r(pool->next);
-		assert(len + e.len + getPoolSize() < EXPANSION_POOL_SIZE);
-		r.resize(expansionObject::Gen_Sum((int)len, els, (int)e.len, e.els, r.els));
-		return r;
-	}
+	expansion operator+(const expansion& e) const;
+	expansion operator-(const expansion& e) const;
+	expansion operator*(const expansion& e) const;
+	expansion operator-(const double d) const;
+	expansion operator*(const double& d) const;
 
-	expansion operator-(const expansion& e) const {
-		expansion r(pool->next);
-		assert(len + e.len + getPoolSize() < EXPANSION_POOL_SIZE);
-		r.resize(expansionObject::Gen_Diff((int)len, els, (int)e.len, e.els, r.els));
-		return r;
-	}
+	void operator=(const double d);
 
-	expansion operator*(const expansion& e) const {
-		expansion r(pool->next);
-		assert(len * e.len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
-		r.resize(expansionObject::Gen_Product((int)len, els, (int)e.len, e.els, r.els));
-		return r;
-	}
-
-	expansion operator-(const double d) const {
-		expansion r(pool->next);
-		assert(len + 1 + getPoolSize() < EXPANSION_POOL_SIZE);
-		r.resize(expansionObject::Gen_Diff((int)len, els, 1, &d, r.els));
-		return r;
-	}
-
-	expansion operator*(const double& d) const {
-		expansion r(pool->next);
-		assert(len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
-		r.resize(expansionObject::Gen_Scale((int)len, els, d, r.els));
-		return r;
-	}
-
-	void operator=(const double d) {
-		assert(1 + getPoolSize() < EXPANSION_POOL_SIZE);
-		els = pool->next++;
-		len = 1;
-		*els = d;
-	}
-
-	expansion sqr() const {
-		expansion r(pool->next);
-		assert(len * len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
-		r.resize(expansionObject::Gen_Square((int)len, els, r.els));
-		return r;
-	}
+	expansion sqr() const;
 
 	double get_d() const { return els[len - 1]; }
 
@@ -615,66 +575,33 @@ public:
 
 protected:
 	expansion(double* pn) : els(pn) { }
-	expansion(size_t s) : els(pool->next), len(s) {
-		assert(s + getPoolSize() < EXPANSION_POOL_SIZE);
-		pool->next += s;
-	}
+	expansion(size_t s);
 
-	void resize(size_t l) {
-		assert(l + getPoolSize() < EXPANSION_POOL_SIZE);
-		len = l; pool->next += l;
-	}
+	void resize(size_t l);
 
 	friend class s_expansion;
 };
 
-inline std::ostream& operator<<(std::ostream& os, const expansion& p)
-{
-	for (size_t i = 0; i < p.len; i++) os << (i ? " " : "") << p.els[i];
-	return os;
-}
+std::ostream& operator<<(std::ostream& os, const expansion& p);
 
-inline int sgn(const expansion& e) {
-	const double d = e.get_d();
-	return (d > 0) - (d < 0);
-}
+int sgn(const expansion& e);
 
+// Singleton expansion
 class s_expansion {
 public:
 	double val;
 
 	s_expansion(const double d) : val(d) {}
 
-	expansion operator+(const s_expansion& e) const {
-		expansion r((uint64_t)2);
-		expansionObject::Two_Sum(val, e.val, r.els[1], r.els[0]);
-		return r;
-	}
-
-	expansion operator-(const s_expansion& e) const {
-		expansion r((uint64_t)2);
-		expansionObject::Two_Diff(val, e.val, r.els[1], r.els[0]);
-		return r;
-	}
-
-	expansion operator*(const s_expansion& e) const {
-		expansion r((uint64_t)2);
-		expansionObject::Two_Prod(val, e.val, r.els[1], r.els[0]);
-		return r;
-	}
-
-	expansion operator*(const expansion& e) const {
-		return e * (*this);
-	}
+	expansion operator+(const s_expansion& e) const;
+	expansion operator-(const s_expansion& e) const;
+	expansion operator*(const s_expansion& e) const;
+	expansion operator*(const expansion& e) const;
 
 	operator double() const { return val; }
 };
 
-inline expansion operator-(const double& d, const s_expansion& e) {
-	expansion r = e - s_expansion(d);
-	r.negate();
-	return r;
-}
+expansion operator-(const double& d, const s_expansion& e);
 
 
 #ifdef USE_GNU_GMP_CLASSES
@@ -967,6 +894,7 @@ public:
 	// Comparison
 	bool operator==(const bigfloat& b) const;
 	bool operator!=(const bigfloat& b) const;
+	bool operator<(const bigfloat& b) const;
 
 	// Sign switch
 	void invert();
@@ -1525,12 +1453,7 @@ inline interval_number interval_number::pow(unsigned int e) const {
 
 
 inline interval_number interval_number::pow2() const {
-	__m128d u = _mm_and_pd(interval, sign_fabs_mask());
-	__m128d iu = _mm_shuffle_pd(u, u, 1);
-
-	if (_mm_comigt_sd(iu, u)) u = iu;
-	if (_mm_movemask_pd(interval) == 0) return _mm_and_pd(_mm_mul_pd(u, u), all_high_mask());
-	else return _mm_mul_pd(_mm_xor_pd(u, sign_low_mask()), u);
+	return sqr();
 }
 
 inline interval_number interval_number::pow3() const {
@@ -1688,13 +1611,15 @@ inline interval_number interval_number::pow(unsigned int e) const {
 }
 
 inline interval_number interval_number::pow2() const {
-	if (fabs(min_low) > fabs(high)) {
-		if (min_low < 0 || high < 0) return interval_number((-high) * (high), min_low * min_low);
-		else return interval_number(0, min_low * min_low);
+	const double _fm = min_low * min_low, _fM = high * high;
+
+	if (_fm > _fM) {
+		if (min_low < 0 || high < 0) return interval_number(-_fM, _fm);
+		else return interval_number(0, _fm);
 	}
 	else {
-		if (min_low < 0 || high < 0) return interval_number((-min_low) * (min_low), high * high);
-		else return interval_number(0, high * high);
+		if (min_low < 0 || high < 0) return interval_number(-_fm, _fM);
+		else return interval_number(0, _fM);
 	}
 }
 
@@ -2245,6 +2170,111 @@ inline int expansionObject::Gen_Product_With_PreAlloc(const int alen, const doub
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 //
+// FUNCTION IMPLEMENTATIONS - EXPANSION INTERFACE
+//
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+inline expansion expansion::operator+(const expansion& e) const {
+	expansion r(pool->next);
+	assert(len + e.len + getPoolSize() < EXPANSION_POOL_SIZE);
+	r.resize(expansionObject::Gen_Sum((int)len, els, (int)e.len, e.els, r.els));
+	return r;
+}
+
+inline expansion expansion::operator-(const expansion& e) const {
+	expansion r(pool->next);
+	assert(len + e.len + getPoolSize() < EXPANSION_POOL_SIZE);
+	r.resize(expansionObject::Gen_Diff((int)len, els, (int)e.len, e.els, r.els));
+	return r;
+}
+
+inline expansion expansion::operator*(const expansion& e) const {
+	expansion r(pool->next);
+	assert(len * e.len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
+	r.resize(expansionObject::Gen_Product((int)len, els, (int)e.len, e.els, r.els));
+	return r;
+}
+
+inline expansion expansion::operator-(const double d) const {
+	expansion r(pool->next);
+	assert(len + 1 + getPoolSize() < EXPANSION_POOL_SIZE);
+	r.resize(expansionObject::Gen_Diff((int)len, els, 1, &d, r.els));
+	return r;
+}
+
+inline expansion expansion::operator*(const double& d) const {
+	expansion r(pool->next);
+	assert(len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
+	r.resize(expansionObject::Gen_Scale((int)len, els, d, r.els));
+	return r;
+}
+
+inline void expansion::operator=(const double d) {
+	assert(1 + getPoolSize() < EXPANSION_POOL_SIZE);
+	els = pool->next++;
+	len = 1;
+	*els = d;
+}
+
+inline expansion expansion::sqr() const {
+	expansion r(pool->next);
+	assert(len * len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
+	r.resize(expansionObject::Gen_Square((int)len, els, r.els));
+	return r;
+}
+
+inline expansion::expansion(size_t s) : els(pool->next), len(s) {
+	assert(s + getPoolSize() < EXPANSION_POOL_SIZE);
+	pool->next += s;
+}
+
+inline void expansion::resize(size_t l) {
+	assert(l + getPoolSize() < EXPANSION_POOL_SIZE);
+	len = l; pool->next += l;
+}
+
+inline std::ostream& operator<<(std::ostream& os, const expansion& p)
+{
+	for (size_t i = 0; i < p.len; i++) os << (i ? " " : "") << p.els[i];
+	return os;
+}
+
+inline int sgn(const expansion& e) {
+	const double d = e.get_d();
+	return (d > 0) - (d < 0);
+}
+
+inline expansion s_expansion::operator+(const s_expansion& e) const {
+	expansion r((uint64_t)2);
+	expansionObject::Two_Sum(val, e.val, r.els[1], r.els[0]);
+	return r;
+}
+
+inline expansion s_expansion::operator-(const s_expansion& e) const {
+	expansion r((uint64_t)2);
+	expansionObject::Two_Diff(val, e.val, r.els[1], r.els[0]);
+	return r;
+}
+
+inline expansion s_expansion::operator*(const s_expansion& e) const {
+	expansion r((uint64_t)2);
+	expansionObject::Two_Prod(val, e.val, r.els[1], r.els[0]);
+	return r;
+}
+
+inline expansion s_expansion::operator*(const expansion& e) const {
+	return e * (*this);
+}
+
+inline expansion operator-(const double& d, const s_expansion& e) {
+	expansion r = e - s_expansion(d);
+	r.negate();
+	return r;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+//
 // FUNCTION IMPLEMENTATIONS - BIGNATURAL
 //
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -2478,14 +2508,14 @@ inline void bignatural::operator>>=(uint32_t n) {
 inline bool bignatural::operator==(const bignatural& b) const {
 	if (size() != b.size()) return false;
 	auto dp = digits, de = digits + m_size, db = b.digits;
-	while (dp != de && *dp++ == *db++);
+	while (dp != de && *dp == *db) { dp++; db++; }
 	return (dp == de);
 }
 
 inline bool bignatural::operator!=(const bignatural& b) const {
 	if (size() != b.size()) return true;
 	auto dp = digits, de = digits + m_size, db = b.digits;
-	while (dp != de && *dp++ == *db++);
+	while (dp != de && *dp == *db) { dp++; db++; }
 	return (dp != de);
 }
 
@@ -2966,6 +2996,29 @@ inline void bigfloat::increaseMantissa() { mantissa += 1U; pack(); }
 inline bool bigfloat::operator==(const bigfloat& b) const { return (operator-(b).sign == 0); }
 
 inline bool bigfloat::operator!=(const bigfloat& b) const { return (operator-(b).sign != 0); }
+
+inline bool bigfloat::operator<(const bigfloat& b) const {
+	assert(0 && "This function must be tested!");
+
+	if (sign < b.sign) return true;
+	if (sign > b.sign) return false;
+	const int32_t na = exponent + mantissa.getNumSignificantBits();
+	const int32_t nb = b.exponent + b.mantissa.getNumSignificantBits();
+	if (sign >= 0) {
+		if (na < nb) return true;
+		else if (na > nb) return false;
+		else if (exponent < b.exponent) return mantissa < (b.mantissa << (b.exponent - exponent));
+		else if (exponent > b.exponent) return (mantissa << (exponent - b.exponent)) < b.mantissa;
+		else return mantissa < b.mantissa;
+	}
+	else {
+		if (na < nb) return false;
+		else if (na > nb) return true;
+		else if (exponent < b.exponent) return mantissa > (b.mantissa << (b.exponent - exponent));
+		else if (exponent > b.exponent) return (mantissa << (exponent - b.exponent)) > b.mantissa;
+		else return mantissa > b.mantissa;
+	}
+}
 
 inline void bigfloat::invert() { sign = -sign; }
 
