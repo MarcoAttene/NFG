@@ -251,6 +251,9 @@ protected:
 // An interval_number is a pair of doubles representing an interval.
 // Operations on interval_number require that the rounding mode is
 // set to +INFINITY. Use setFPUModeToRoundUP().
+//
+// All the four arithmetic operations and the square root are correctly
+// rounded.
 
 class interval_number
 {
@@ -1797,13 +1800,18 @@ inline bool interval_number::operator!=(const interval_number& b) const { return
 
 inline interval_number sqrt(const interval_number& p)
 {
+	// We assume IEEE754, therefore sqrt(double) is correctly rounded.
+	// We also assume that current rounding is towards +infinity.
+	// sqrt(sup) is correctly rounded but sqrt(inf) is rounded on the opposite side.
+	// Hence, we compute sqrt(inf) and check whether rounding takes place. If so, we
+	// shift to the previous representable number to invert the rounding as needed.
 	const double inf = p.inf();
 	const double sup = p.sup();
 	if (inf < 0 || sup < 0) return interval_number(NAN);
-	const double srinf = sqrt(inf);
+	double srinf = sqrt(inf);
 	const double srsup = sqrt(sup);
-	if (srinf * srinf > inf) return interval_number((-nextafter(srinf, 0)), srsup);
-	else return interval_number(-srinf, srsup);
+	if (srinf * srinf > inf) (*(((uint64_t*)(&srinf))))--; // This works because srinf is finite
+	return interval_number(-srinf, srsup);
 }
 
 
