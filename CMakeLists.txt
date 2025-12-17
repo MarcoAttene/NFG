@@ -1,3 +1,4 @@
+
 cmake_minimum_required(VERSION 3.10)
 
 # Set the target architecture.
@@ -19,21 +20,29 @@ set(ENABLE_AVX2 True)		#Build for x86-64 with AVX2
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
+# disable SSE and AVX on MacOS
+if(APPLE)
+set(ENABLE_SSE2 False)
+set(ENABLE_AVX2 False)
+endif()
+
 # AVX includes SSE -> make that explicit
 if(ENABLE_AVX2)
 set(ENABLE_SSE2 True)
 endif()
 
-# Check that no incompatible architectures are selected
+# Check that no incompatible architectures are slelected
 if(ENABLE_ARMNEON AND ENABLE_SSE2)
-message(FATAL_ERROR "ARMNEON and SSE2/AVX2 cannot be both selected!")
+message(FATAL_ERROR "ARMNEON and SSE2/AVX2 cannot be both set!")
 endif()
 
 # set the project name
-project(numerics)
+project(indirectPredicates)
 
 # add the executable
-add_executable(${PROJECT_NAME} test.cpp)
+add_executable(${PROJECT_NAME} 
+    test.cpp
+)
 
 # Compiler-specific options
 if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
@@ -79,4 +88,6 @@ if(ENABLE_ARMNEON)
 	message(STATUS "simde is available in " ${simde_SOURCE_DIR})
 
 	target_include_directories(${PROJECT_NAME} PUBLIC ${simde_SOURCE_DIR}/simde)
+	target_compile_options(${PROJECT_NAME} PUBLIC -DSIMDE_ENABLE_NATIVE_ALIASES)
 endif()
+
