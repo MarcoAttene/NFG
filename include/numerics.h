@@ -1558,7 +1558,18 @@ inline interval_number interval_number::pow2() const {
 }
 
 inline interval_number interval_number::pow3() const {
-	return _mm_mul_pd(interval, _mm_mul_pd(interval, interval));
+	// Accumulate keeping the sign fixed, as pow() does for odd exponents:
+	// each lane is multiplied by the MAGNITUDE of the other endpoint, so
+	// the rounding error always grows the interval outwards. Multiplying
+	// the signed lanes directly (x*x*x) flips the sign at the second
+	// product, turning the over-estimated square into an under-estimated
+	// cube: the resulting lower endpoint ends up 1-2 ulp ABOVE the true
+	// cube and the interval no longer contains it.
+	// Note the association: ((v*|v|)*|v|), not (v*(|v|*|v|)).
+	const __m128d uns = _mm_and_pd(interval, sign_fabs_mask());
+	__m128d ui = _mm_mul_pd(interval, uns);
+	ui = _mm_mul_pd(ui, uns);
+	return interval_number(ui);
 }
 
 #else // USE_SIMD_INSTRUCTIONS
@@ -1780,7 +1791,11 @@ inline interval_number interval_number::pow2() const {
 }
 
 inline interval_number interval_number::pow3() const {
-	return interval_number(min_low * min_low * min_low, high * high * high);
+	// Same fix as the SIMD path: multiply the signed endpoint by the
+	// magnitudes, so that the sign never flips during the accumulation and
+	// FE_UPWARD rounds both fields outwards. See the comment there.
+	const double _uinf = fabs(min_low), _usup = fabs(high);
+	return interval_number((min_low * _uinf) * _uinf, (high * _usup) * _usup);
 }
 
 #endif // USE_SIMD_INSTRUCTIONS
