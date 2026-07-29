@@ -1810,7 +1810,14 @@ inline double interval_number::width() const { return sup() - inf(); }
 inline bool interval_number::signIsReliable() const { return (isNegative() || isPositive()); } // Zero is not accounted for
 inline bool interval_number::containsZero() const { return !signIsReliable(); }
 
-inline bool interval_number::isNAN() const { return sup() != sup(); }
+// Both endpoints must be tested: a NaN stored in min_low alone (e.g. the
+// result of adding an empty interval to a half-infinite one) left the
+// interval corrupted while isNAN() still reported false. IEEE 754-2019
+// Cl. 6.2 propagates a NaN to every result, so a diagnostic predicate that
+// inspects half of the datum defeats its own purpose.
+// '!=' is a quiet predicate (Cl. 5.11, compareQuietNotEqual): unlike '<' it
+// raises no invalid operation on a quiet NaN, so the test stays silent.
+inline bool interval_number::isNAN() const { return sup() != sup() || inf() != inf(); }
 
 inline double interval_number::getMid() const { return (inf() + sup()) / 2; }
 inline bool interval_number::isExact() const { return inf() == sup(); }
