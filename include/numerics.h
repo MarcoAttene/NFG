@@ -1371,7 +1371,12 @@ inline interval_number interval_number::fmadd(const interval_number& b, const in
 
 inline interval_number interval_number::fmsub(const interval_number& b, const interval_number& c) const
 {
-	return fmadd(b, c.inverse());
+	// a.fmsub(b, c) is a*b - c, hence the third addend must be the ADDITIVE
+	// inverse of c. inverse() is the multiplicative one (the reciprocal 1/x,
+	// see below), so it used to compute a*b + 1/c; it also raised a division
+	// by zero whenever c contained zero. operator-() is just a swap of the
+	// two lanes: exact, and it never signals.
+	return fmadd(b, -c);
 }
 
 #else
