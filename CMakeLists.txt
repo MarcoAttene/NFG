@@ -1,4 +1,3 @@
-
 cmake_minimum_required(VERSION 3.10)
 
 # Set the target architecture.
@@ -37,7 +36,7 @@ message(FATAL_ERROR "ARMNEON and SSE2/AVX2 cannot be both set!")
 endif()
 
 # set the project name
-project(indirectPredicates)
+project(nfg)
 
 # add the executable
 add_executable(${PROJECT_NAME} 
@@ -61,6 +60,11 @@ else()
 	target_compile_options(${PROJECT_NAME} PUBLIC -O3)
 	# grant IEEE 754 compliance
 	target_compile_options(${PROJECT_NAME} PUBLIC -frounding-math)
+	# the exact predicates rely on error-free transformations (e.g. Dekker
+	# two-product): forbid the compiler from contracting a*b+c into an FMA, which
+	# rounds once instead of twice and silently breaks those identities. This
+	# mirrors the /fp:strict used on the MSVC path.
+	target_compile_options(${PROJECT_NAME} PUBLIC -ffp-contract=off)
 	# set target architecture
 	if(ENABLE_AVX2)
 		target_compile_options(${PROJECT_NAME} PUBLIC "-mavx2")
