@@ -1437,23 +1437,27 @@ inline interval_number interval_number::operator/(const interval_number& b) cons
 	// 9	-+ +-				++ --
 	// 10	-+ -+				++ ++
 
+	// In the SIMD build the 'interval' register is packed as
+	// [high, min_low] (lane0=high=hi, lane1=min_low=-lo). Every case is
+	// resolved by a SINGLE _mm_div_pd(N, D) with both lanes rounded
+	// towards +inf (FE_UPWARD): lane0 yields hi_r (rounded outwards, up)
+	// and lane1 yields min_low_r=-lo_r (which rounds lo_r outwards, down).
+	// The formulas match the ones verified on the scalar path. Actual
+	// configurations (b has a reliable sign, hence it excludes zero):
 	switch ((_mm_movemask_pd(interval) << 2) | _mm_movemask_pd(b.interval))
 	{
-	case 1: // -+ * --: <b0*a1, b0*a0>
-		return interval_number(_mm_div_pd(_mm_shuffle_pd(b.interval, b.interval, 3), _mm_shuffle_pd(interval, interval, 1)));
-	case 2: // -+ * ++: <b1*a0, b1*a1>
-		return interval_number(_mm_div_pd(_mm_shuffle_pd(b.interval, b.interval, 0), interval));
-	case 5: // -- * --: <a1*b1, a0*b0>
-		ip = _mm_div_pd(_mm_xor_pd(interval, sign_high_mask()), b.interval);
-		return interval_number(_mm_shuffle_pd(ip, ip, 1));
-	case 6: // -- * ++: <a0*b1, a1*b0>
-		ssg = _mm_xor_pd(b.interval, sign_low_mask());
-		return interval_number(_mm_div_pd(interval, _mm_shuffle_pd(ssg, ssg, 1)));
-	case 9: // ++ * --: <b0*a1, b1*a0>
-		ssg = _mm_xor_pd(interval, sign_low_mask());
-		return interval_number(_mm_div_pd(b.interval, _mm_shuffle_pd(ssg, ssg, 1)));
-	case 10: // ++ * ++: <a0*b0, a1*b1>
+	case 1: // a contains 0, b<0: lo_r=hi/hb, hi_r=lo/hb -> N=[lo,-hi], D=[hb,hb]
+		return interval_number(_mm_div_pd(_mm_xor_pd(_mm_shuffle_pd(interval, interval, 1), _mm_set1_pd(-0.0)), _mm_shuffle_pd(b.interval, b.interval, 0)));
+	case 2: // a contains 0, b>0: lo_r=lo/lb, hi_r=hi/lb -> N=interval, D=[lb,lb]
+		return interval_number(_mm_div_pd(interval, _mm_xor_pd(_mm_shuffle_pd(b.interval, b.interval, 3), _mm_set1_pd(-0.0))));
+	case 5: // a<0, b<0
+		return interval_number(_mm_div_pd(_mm_xor_pd(_mm_shuffle_pd(interval, interval, 1), sign_high_mask()), b.interval));
+	case 6: // a<0, b>0
 		return interval_number(_mm_div_pd(interval, _mm_xor_pd(b.interval, sign_low_mask())));
+	case 9: // a>0, b<0
+		return interval_number(_mm_div_pd(_mm_xor_pd(_mm_shuffle_pd(interval, interval, 1), sign_low_mask()), _mm_shuffle_pd(b.interval, b.interval, 1)));
+	case 10: // a>0, b>0
+		return interval_number(_mm_div_pd(interval, _mm_xor_pd(_mm_shuffle_pd(b.interval, b.interval, 1), sign_high_mask())));
 	}
 
 	return interval_number(NAN);
@@ -1681,12 +1685,12 @@ inline interval_number interval_number::operator/(const interval_number& b) cons
 	// 10	-+ -+				++ ++
 	switch (cfg)
 	{
-	case 10: return interval_number(min_low / (-b.min_low), high / b.high);
-	case 9: return interval_number(high / b.min_low, (-min_low) / b.high);
-	case 2: return interval_number(min_low / b.high, high / b.high);
-	case 1: return interval_number(high / b.min_low, min_low / b.min_low);
-	case 6: return interval_number(min_low / b.high, high / (-b.min_low));
-	case 5: return interval_number((-high) / b.high, min_low / b.min_low);
+	case 10: return interval_number(min_low / b.high, high / (-b.min_low));
+	case 9: return interval_number((-high) / b.high, min_low / b.min_low);
+	case 2: return interval_number(min_low / (-b.min_low), high / (-b.min_low));
+	case 1: return interval_number((-high) / b.high, (-min_low) / b.high);
+	case 6: return interval_number(min_low / (-b.min_low), high / b.high);
+	case 5: return interval_number(high / b.min_low, (-min_low) / b.high);
 	};
 
 	return interval_number(NAN);
