@@ -1371,7 +1371,12 @@ inline interval_number interval_number::fmadd(const interval_number& b, const in
 
 inline interval_number interval_number::fmsub(const interval_number& b, const interval_number& c) const
 {
-	return fmadd(b, c.inverse());
+	// a.fmsub(b, c) is a*b - c, hence the third addend must be the ADDITIVE
+	// inverse of c. inverse() is the multiplicative one (the reciprocal 1/x,
+	// see below), so it used to compute a*b + 1/c; it also raised a division
+	// by zero whenever c contained zero. operator-() is just a swap of the
+	// two lanes: exact, and it never signals.
+	return fmadd(b, -c);
 }
 
 #else
@@ -1558,7 +1563,18 @@ inline interval_number interval_number::pow2() const {
 }
 
 inline interval_number interval_number::pow3() const {
-	return _mm_mul_pd(interval, _mm_mul_pd(interval, interval));
+	// Accumulate keeping the sign fixed, as pow() does for odd exponents:
+	// each lane is multiplied by the MAGNITUDE of the other endpoint, so
+	// the rounding error always grows the interval outwards. Multiplying
+	// the signed lanes directly (x*x*x) flips the sign at the second
+	// product, turning the over-estimated square into an under-estimated
+	// cube: the resulting lower endpoint ends up 1-2 ulp ABOVE the true
+	// cube and the interval no longer contains it.
+	// Note the association: ((v*|v|)*|v|), not (v*(|v|*|v|)).
+	const __m128d uns = _mm_and_pd(interval, sign_fabs_mask());
+	__m128d ui = _mm_mul_pd(interval, uns);
+	ui = _mm_mul_pd(ui, uns);
+	return interval_number(ui);
 }
 
 #else // USE_SIMD_INSTRUCTIONS
@@ -1780,7 +1796,11 @@ inline interval_number interval_number::pow2() const {
 }
 
 inline interval_number interval_number::pow3() const {
-	return interval_number(min_low * min_low * min_low, high * high * high);
+	// Same fix as the SIMD path: multiply the signed endpoint by the
+	// magnitudes, so that the sign never flips during the accumulation and
+	// FE_UPWARD rounds both fields outwards. See the comment there.
+	const double _uinf = fabs(min_low), _usup = fabs(high);
+	return interval_number((min_low * _uinf) * _uinf, (high * _usup) * _usup);
 }
 
 #endif // USE_SIMD_INSTRUCTIONS
@@ -1790,7 +1810,14 @@ inline double interval_number::width() const { return sup() - inf(); }
 inline bool interval_number::signIsReliable() const { return (isNegative() || isPositive()); } // Zero is not accounted for
 inline bool interval_number::containsZero() const { return !signIsReliable(); }
 
-inline bool interval_number::isNAN() const { return sup() != sup(); }
+// Both endpoints must be tested: a NaN stored in min_low alone (e.g. the
+// result of adding an empty interval to a half-infinite one) left the
+// interval corrupted while isNAN() still reported false. IEEE 754-2019
+// Cl. 6.2 propagates a NaN to every result, so a diagnostic predicate that
+// inspects half of the datum defeats its own purpose.
+// '!=' is a quiet predicate (Cl. 5.11, compareQuietNotEqual): unlike '<' it
+// raises no invalid operation on a quiet NaN, so the test stays silent.
+inline bool interval_number::isNAN() const { return sup() != sup() || inf() != inf(); }
 
 inline double interval_number::getMid() const { return (inf() + sup()) / 2; }
 inline bool interval_number::isExact() const { return inf() == sup(); }
