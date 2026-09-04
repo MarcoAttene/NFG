@@ -265,27 +265,57 @@ class interval_number
 #endif // USE_SIMD_INSTRUCTIONS
 
 public:
+	// Undefined interval (can be invalid)
 	interval_number();
+
+	// Singleton [a, a]
 	interval_number(const double a);
+
+	// Interval [-minf, sup]
 	interval_number(const double minf, const double sup);
+
+	// Copy constructor
 	interval_number(const interval_number& b);
 
+	// Access the two bounds
 	const double* getInterval() const;
 
+	// Negated infimum
 	double minus_inf() const;
+
+	// Infimum
 	double inf() const;
+
+	// Supremum
 	double sup() const;
 
+	// TRUE if the entire interval is negative
 	bool isNegative() const;
+
+	// TRUE if the entire interval is positive
 	bool isPositive() const;
+
+	// Invert the interval sign (additive inversion)
 	void negate();
 
+	// Copy assignment
 	interval_number& operator=(const interval_number& b);
 
-	int sign() const; // Zero is not accounted for
+	// TRUE if interval is entirely positive or entirely negative
+	bool signIsReliable() const;
 
+	// TRUE if interval contains zero
+	bool containsZero() const;
+
+	// This is -1 if interval is entirely negative, +1 otherwise
+	// Should be used only when signIsReliable() is TRUE
+	int sign() const;
+
+	// Return the additive inverse
 	interval_number operator-() const;
 
+	// Arithmetic operations
+	// Division by an interval that contains zero produces a NAN interval
 	interval_number operator+(const interval_number& b) const;
 	interval_number operator-(const interval_number& b) const;
 	interval_number operator*(const interval_number& b) const;
@@ -308,22 +338,37 @@ public:
 	interval_number fmsub(const interval_number& b, const interval_number& c) const;
 #endif
 
+	// Absolute value
 	interval_number abs() const;
+
+	// Suqared interval
 	interval_number sqr() const;
+
+	// Integer-exponent power
 	interval_number pow(unsigned int e) const;
+
+	// Square
 	interval_number pow2() const;
+
+	// Cube
 	interval_number pow3() const;
+
+	// Minimum
 	friend interval_number min(const interval_number& a, const interval_number& b);
+
+	// Maximum
 	friend interval_number max(const interval_number& a, const interval_number& b);
 
+	// Interval width
 	double width() const;
 
-	bool signIsReliable() const; // Zero is not accounted for
-	bool containsZero() const;
-
+	// TRUE if NAN
 	bool isNAN() const;
 
+	// Interval midpoint
 	double getMid() const;
+
+	// TRUE if interval is a singleton
 	bool isExact() const;
 
 	// Can be TRUE only if the intervals are disjoint
@@ -737,6 +782,9 @@ public:
 	bool operator<=(const bignatural& b) const;
 	bool operator<(const bignatural& b) const;
 
+	// TRUE if number is exactly 1
+	bool isOne() const { return m_size == 1 && *digits == 1; }
+
 	// Arithmetic operations
 	bignatural& operator+=(const bignatural& b);
 	bignatural& operator+=(const uint32_t b);
@@ -767,8 +815,11 @@ public:
 	bignatural operator|(const bignatural& b) const;
 	void operator|=(uint32_t i);
 
-	// Greatest common divisor (Euclidean algorithm)
+	// Greatest common divisor
 	bignatural GCD(const bignatural& D) const;
+
+	// TRUE if this number and D have no common factors
+	bool coprime(const bignatural& D) const;
 
 	// String representation in decimal form
 	std::string get_dec_str() const;
@@ -809,6 +860,15 @@ protected:
 	// Assumes that number is not zero and last limb is not zero!
 	uint32_t countEndingZeroesLSL() const;
 
+	// Both the following assume that the number is not zero!
+	bool is_odd() const { return (back() & 1); }
+	bool is_even() const { return !is_odd(); }
+
+	// Greatest common divisor
+	// This assumes the particular case where none of the two
+	// numbers is zero.
+	bignatural GCD_non_zero(const bignatural& D) const;
+
 	void pack();
 
 	// a and b must NOT be this number!
@@ -820,6 +880,12 @@ protected:
 
 	// a and b must NOT be this number!
 	void toProd(const bignatural& a, const bignatural& b);
+
+	// Short division with no remainder
+	bignatural divide_by_exact(const uint32_t D) const;
+
+	// Long division with no remainder
+	bignatural divide_by_exact(const bignatural& divisor) const;
 
 private:
 
@@ -986,9 +1052,7 @@ public:
 
 	// Create from explicit numerator, denominator and sign.
 	bigrational(const bignatural& num, const bignatural& den, int32_t s) :
-		numerator(num), denominator(den), sign(s) {
-		canonicalize();
-	}
+		numerator(num), denominator(den), sign(s) {	}
 
 	// Convert to multiplicative inverse
 	void invert();
@@ -1038,11 +1102,11 @@ public:
 	std::string get_str() const;
 
 protected:
-	// Iteratively divide both num and den by two as long as they are both even
-	void compress();
-
 	// Make numerator and denominator coprime (divide both by GCD)
 	void canonicalize();
+
+	// Iteratively divide both num and den by two as long as they are both even
+	void compress();
 
 	void init(FILE* fp);
 };
@@ -2791,6 +2855,31 @@ inline bignatural bignatural::divide_by(const uint32_t D, uint32_t& remainder) c
 	return Q;
 }
 
+// Short division (assumes no remainder)
+inline bignatural bignatural::divide_by_exact(const uint32_t D) const {
+	assert(D != 0);
+
+	// If dividend fits into 64 bits, use hardware division
+	uint64_t n;
+	if (toUint64(n)) return n / D;
+
+	bignatural Q;
+	uint32_t next_digit = 0;
+	uint64_t dividend = digits[next_digit++];
+	for (;;) {
+		uint64_t tmp_div = dividend / D;
+		if (!Q.empty() || tmp_div) Q.push_back((uint32_t)tmp_div);
+		dividend -= (tmp_div * D);
+		if (next_digit < m_size) {
+			dividend <<= 32;
+			dividend += digits[next_digit++];
+		}
+		else break;
+	}
+
+	return Q;
+}
+
 inline uint32_t bignatural::getNumSignificantBits() const {
 	if (!m_size) return 0;
 	return (m_size * 32) - nfg_count_lz(digits[0]);
@@ -2851,6 +2940,84 @@ inline bignatural bignatural::divide_by(const bignatural& divisor, bignatural& r
 	return quotient;
 }
 
+// Long division which assumes divisor is valid and exact (no remainder)
+inline bignatural bignatural::divide_by_exact(const bignatural& divisor) const {
+	if (empty()) return (uint32_t)0;
+
+	// If divisor fits into 32 bits, revert to short division
+	uint32_t d32;
+	if (divisor.toUint32(d32))  return divide_by_exact(d32);
+
+	// If both dividend and divisor fit into 64 bits, use hardware division
+	uint64_t n64, d64;
+	if (toUint64(n64) && divisor.toUint64(d64)) return n64 / d64;
+
+	bignatural A(*this), B(divisor);
+
+	// 1. Shift both A and B until B becomes odd
+	uint32_t az = A.countEndingZeroes();
+	uint32_t bz = B.countEndingZeroes();
+	uint32_t trailing_zeroes = std::min(az, bz);
+	A >>= trailing_zeroes;
+	B >>= trailing_zeroes;
+
+	// Number of limbs of B and A
+	uint32_t n = B.size();
+	uint32_t m = A.size();
+
+	uint32_t q_size = m - n + 1;
+	bignatural Q;
+	Q.resize(q_size);
+	for (uint32_t i = 0; i < q_size; ++i) Q[i] = 0; // To be optimized. Make another resize with initializer
+
+	// 2. Calculate modular inverse of least significant limb of B modulo 2^32
+	uint32_t b = B.back();
+	uint32_t v = (3 * b) ^ 2; // 4 bit initial approximation
+	v *= (2 - b * v); // 8 bit precision
+	v *= (2 - b * v); // 16 bit precision
+	v *= (2 - b * v); // 32 bit precision
+
+	// 3. Jebelean main loop (Right-to-Left)
+	for (uint32_t i = 0; i < q_size; ++i) {
+		if (A[i] == 0) {
+			Q[i] = 0;
+		}
+		else {
+			// Calculate i-th digit
+			uint32_t q_i = A[i] * v;
+			Q[i] = q_i;
+
+			uint64_t carry = 0, borrow = 0;
+
+			for (uint32_t j = 0; j < n; ++j) {
+				uint64_t prod = static_cast<uint64_t>(q_i) * B[j] + carry;
+				uint32_t prod_low = static_cast<uint32_t>(prod);
+				carry = prod >> 32;
+
+				uint64_t diff = static_cast<uint64_t>(A[i + j]) - prod_low - borrow;
+				A[i + j] = static_cast<uint32_t>(diff);
+
+				borrow = (diff > 0xFFFFFFFFULL) ? 1 : 0;
+			}
+
+			uint32_t k = i + n;
+			while ((carry > 0 || borrow > 0) && k < m) {
+				uint64_t sub = carry + borrow;
+				uint64_t diff = static_cast<uint64_t>(A[k]) - sub;
+				A[k] = static_cast<uint32_t>(diff);
+
+				borrow = (diff > 0xFFFFFFFFULL) ? 1 : 0;
+				carry = 0;
+				k++;
+			}
+		}
+	}
+
+	Q.pack();
+
+	return Q;
+}
+
 inline bignatural bignatural::sqrt() const
 {
 	bignatural low, tmp, high = *this, mid = *this;
@@ -2905,18 +3072,40 @@ inline void bignatural::addOneMostSignificantDigit(uint32_t d) {
 	m_size++;
 }
 
-// Greatest common divisor (Euclidean algorithm)
-inline bignatural bignatural::GCD(const bignatural& D) const {
-	bignatural A = *this;
-	bignatural B = D;
-	bignatural R;
-	while (!A.empty() && !B.empty()) {
-		A.divide_by(B, R);
-		A = B;
-		B = R;
-	}
-	if (A.empty()) return B;
-	else return A;
+// Binary GCD (Stein's Algorithm)
+inline bignatural bignatural::GCD(const bignatural& B) const {
+	if (empty()) return B;
+	if (B.empty()) return *this;
+	return GCD_non_zero(B);
+}
+
+// Co-primality check
+inline bool bignatural::coprime(const bignatural& B) const {
+	if (empty() || B.empty()) return true;
+	if (!(back() & (1UL)) && !(B.back() & (1UL))) return false; // Both numbers are even
+	return !GCD_non_zero(B).isOne();
+}
+
+inline bignatural bignatural::GCD_non_zero(const bignatural& B) const {
+	bignatural a = (*this), b = B;
+
+	uint32_t az = a.countEndingZeroes();
+	uint32_t bz = b.countEndingZeroes();
+	uint32_t k = std::min(az, bz);
+
+	a >>= (az > bz) ? (az) : (k);
+	b >>= k;
+
+	bignatural* ap = &a;
+	bignatural* bp = &b;
+	do {
+		(*bp) >>= bp->countEndingZeroes();
+		if ((*ap) > (*bp)) std::swap(ap, bp);
+		(*bp) -= (*ap);
+	} while (!bp->empty());
+
+	(*ap) <<= k;
+	return (*ap);
 }
 
 // String representation in decimal form
@@ -3575,10 +3764,11 @@ inline void bigrational::canonicalize() {
 		}
 		else {
 			compress();
-			bignatural r;
 			const bignatural gcd = numerator.GCD(denominator);
-			numerator = numerator.divide_by(gcd, r);
-			denominator = denominator.divide_by(gcd, r);
+			if (!gcd.isOne()) {
+				numerator = numerator.divide_by_exact(gcd);
+				denominator = denominator.divide_by_exact(gcd);
+			}
 		}
 	}
 }
@@ -3587,36 +3777,22 @@ inline bigrational bigrational::operator+(const bigrational& r) const {
 	if (sign == 0) return r;
 	else if (r.sign == 0) return *this;
 	else {
-		//bignatural rm;
-		//const bignatural gcd = denominator.GCD(r.denominator);
-		//const bignatural den3 = (denominator * r.denominator).divide_by(gcd, rm);
-		//const bignatural left_den = den3.divide_by(denominator, rm);
-		//const bignatural right_den = den3.divide_by(r.denominator, rm);
-		//const bignatural left_num = numerator * left_den;
-		//const bignatural right_num = r.numerator * right_den;
-		//if (sign > 0 && r.sign > 0)	return bigrational(left_num + right_num, den3, 1);
-		//else if (sign < 0 && r.sign < 0) return bigrational(left_num + right_num, den3, -1);
-		//else if (sign > 0 && r.sign < 0) {
-		//	if (left_num >= right_num) return bigrational(left_num - right_num, den3, 1);
-		//	else return bigrational(right_num - left_num, den3, -1);
-		//}
-		//else { // if (sign < 0 && r.sign > 0)
-		//	if (left_num >= right_num) return bigrational(left_num - right_num, den3, -1);
-		//	else return bigrational(right_num - left_num, den3, 1);
-		//}
-
 		const bignatural left_num = numerator * r.denominator;
 		const bignatural right_num = r.numerator * denominator;
-		if (sign > 0 && r.sign > 0)	return bigrational(left_num + right_num, denominator * r.denominator, 1);
-		else if (sign < 0 && r.sign < 0) return bigrational(left_num + right_num, denominator * r.denominator, -1);
-		else if (sign > 0 && r.sign < 0) {
-			if (left_num >= right_num) return bigrational(left_num - right_num, denominator * r.denominator, 1);
-			else return bigrational(right_num - left_num, denominator * r.denominator, -1);
+		bigrational sum;
+		if (sign == r.sign)	sum = bigrational(left_num + right_num, denominator * r.denominator, sign);
+		else if (sign > 0) {
+			if (left_num >= right_num) sum = bigrational(left_num - right_num, denominator * r.denominator, 1);
+			else sum = bigrational(right_num - left_num, denominator * r.denominator, -1);
 		}
 		else { // if (sign < 0 && r.sign > 0)
-			if (left_num >= right_num) return bigrational(left_num - right_num, denominator * r.denominator, -1);
-			else return bigrational(right_num - left_num, denominator * r.denominator, 1);
+			if (left_num >= right_num) sum = bigrational(left_num - right_num, denominator * r.denominator, -1);
+			else sum = bigrational(right_num - left_num, denominator * r.denominator, 1);
 		}
+
+		if (!denominator.coprime(r.denominator)) sum.canonicalize();
+
+		return sum;
 	}
 }
 
