@@ -888,7 +888,6 @@ protected:
 	bignatural divide_by_exact(const bignatural& divisor) const;
 
 private:
-
 	// Multiplies by a single limb, left shift, and add to accumulator. Does not pack!
 	void addmul(uint32_t b, uint32_t left_shifts, bignatural& result) const;
 
@@ -2596,7 +2595,8 @@ inline void bignatural::reserve(uint32_t n) { if (n > m_capacity) increaseCapaci
 inline void bignatural::resize(uint32_t n) { reserve(n); m_size = n; }
 
 inline void bignatural::fill(uint32_t v) {
-	memset(digits, (int)v, m_size << 2);
+	uint32_t *dend = digits + m_size;
+	while (--dend >= digits) *dend = v;
 }
 
 inline uint32_t bignatural::countEndingZeroesLSL() const {
