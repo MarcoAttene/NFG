@@ -700,6 +700,7 @@ inline void add1ULP(bigfloat& f) {
 // The value 'zero' is represented by an empty digit sequence.
 
 class bignatural {
+protected:
 	uint32_t m_capacity;	// Current vector capacity
 	uint32_t m_size;		// Actual number of digits
 	uint32_t* digits;	    // Ptr to the digits
@@ -707,14 +708,15 @@ class bignatural {
 	static uint32_t* BN_ALLOC(uint32_t num_bytes);
 	static void BN_FREE(uint32_t* ptr);
 
-	// Read as many decimal digits as possible from file so that they fit a uint64_t
+	// Read as many decimal digits as possible from s so that they fit a uint64_t
 	// Return the number of digits read
-	static size_t scan_uint64_t(FILE* fp, uint64_t& t);
+	static size_t scan_uint64_t(const char *s, uint64_t& t);
 
 	void init(const bignatural& m);
 	void init(const uint32_t m);
 	void init(const uint64_t m);
 	void init(FILE* fp);
+	void init(const char *s);
 
 public:
 	// Creates a 'zero'
@@ -734,6 +736,9 @@ public:
 
 	// Construct from unsigned 64bit integer
 	bignatural(uint64_t m);
+
+	// Construct from null-terminated string
+	bignatural(const char *s);
 
 	// Construct from FILE stream
 	bignatural(FILE* f);
@@ -2557,6 +2562,8 @@ inline bignatural::bignatural(uint32_t m) { init(m); }
 
 inline bignatural::bignatural(uint64_t m) { init(m); }
 
+inline bignatural::bignatural(const char *s) { init(s); }
+
 inline bignatural::bignatural(FILE* f) { init(f); }
 
 inline const uint32_t& bignatural::back() const { return digits[m_size - 1]; }
@@ -2603,34 +2610,37 @@ inline uint32_t bignatural::countEndingZeroesLSL() const {
 	return (uint32_t)nfg_count_rz(back());
 }
 
-inline size_t bignatural::scan_uint64_t(FILE* fp, uint64_t& t) {
-	const uint64_t limit_n = (UINT64_MAX - 9) / 10;
+inline void bignatural::init(FILE* fp) {
+	char s[2048]; // Can read up to 2047 decimal digits from file
+	fgets(s, 2047, fp);
+	init(s);
+}
+
+inline size_t bignatural::scan_uint64_t(const char *s, uint64_t& t) {
+	const uint64_t limit_n = UINT64_MAX / 10 - 1;
 	uint64_t n = 0;
 	size_t i = 0;
 
-	// Quick scan of the first two limbs
-	int c = fgetc(fp);
+	int c = s[i];
 	while (isdigit(c) && n <= limit_n) {
-		i++;
 		n *= 10;
 		n += (c - '0');
-		c = fgetc(fp);
+		c = s[++i];
 	}
-	if (c != EOF) ungetc(c, fp);
 
 	t = n;
 	return i;
 }
 
-inline void bignatural::init(FILE* fp) {
-	uint64_t n, m;
-	scan_uint64_t(fp, n);
-	init(n);
-	size_t r;
-	while ((r = scan_uint64_t(fp, n)) != 0) {
-		m = 1;
-		while (r--) m *= 10;
-		operator*=(m);
+inline void bignatural::init(const char *s) {
+	m_size = m_capacity = 0;
+	digits = NULL;
+
+	uint64_t n;
+	size_t r = 0;
+	while ((r = scan_uint64_t(s, n)) != 0) {
+		s += r;
+		while (r--) operator*=(10ULL);
 		operator+=(n);
 	}
 }
