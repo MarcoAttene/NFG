@@ -67,6 +67,7 @@
 #include <gmpxx.h>
 #endif
 
+// Set SIMD support
 #if INTPTR_MAX == INT64_MAX
 #	ifdef __SSE2__
 #		define USE_SIMD_INSTRUCTIONS
@@ -96,6 +97,8 @@
 #	pragma fenv_access (on)
 #   if _MSVC_LANG >= 202002L
 #       define STDCPLUSPLUS20
+#	elif __cplusplus >= 202002L
+#       define STDCPLUSPLUS20
 #   endif
 #else
 #	pragma STDC FENV_ACCESS ON
@@ -123,6 +126,8 @@ inline void ip_error(const char* msg)
 #include <bit>
 inline int nfg_count_lz(uint32_t v) { return std::countl_zero(v); }
 inline int nfg_count_rz(uint32_t v) { return std::countr_zero(v); }
+inline int nfg_count_lz(uint64_t v) { return std::countl_zero(v); }
+inline int nfg_count_rz(uint64_t v) { return std::countr_zero(v); }
 #else
 // Slower versions of the above functions for C++ standards < 20
 inline int nfg_count_lz(uint32_t v) {
@@ -136,7 +141,133 @@ inline int nfg_count_rz(uint32_t v) {
 	while (v) { v <<= 1; z--; }
 	return z;
 }
+
+inline int nfg_count_lz(uint64_t v) {
+	int z = 64;
+	while (v) { v >>= 1; z--; }
+	return z;
+}
+
+inline int nfg_count_rz(uint64_t v) {
+	int z = 64;
+	while (v) { v <<= 1; z--; }
+	return z;
+}
 #endif
+
+// Set out = a + b + carry and return 1 if overflow occurs (i.e. if sum exceeds 64 bits)
+inline uint8_t _nfg_add_with_carry(uint8_t carry, uint64_t a, uint64_t b, uint64_t* out) {
+#if defined(_MSC_VER) && defined(USE_AVX2_INSTRUCTIONS)
+	// 1. MSVC (x64 / ARM64): Uses hardware intrinsic directly
+	return _addcarry_u64(carry, a, b, reinterpret_cast<unsigned __int64*>(out));
+
+#elif defined(__has_builtin) && __has_builtin(__builtin_addcl)
+	// 2. Clang (x86/x64, ARM64, RISC-V): Clang's architecture-agnostic builtin
+	unsigned long long carry_out = 0;
+	*out = __builtin_addcl(a, b, carry, &carry_out);
+	return static_cast<uint8_t>(carry_out);
+
+#elif defined(__SIZEOF_INT128__)
+	// 3. GCC / Clang (64-bit platforms): Optimal code generation via 128-bit integer
+	unsigned __int128 sum = static_cast<unsigned __int128>(a) + b + carry;
+	*out = static_cast<uint64_t>(sum);
+	return static_cast<uint8_t>(sum >> 64);
+#else
+	// 5. Pure C++ Standard Fallback (ARM32, WebAssembly, 32-bit platforms)
+	uint64_t sum1 = a + b;
+	uint8_t c1 = (sum1 < a) ? 1 : 0;
+
+	uint64_t sum2 = sum1 + carry;
+	uint8_t c2 = (sum2 < sum1) ? 1 : 0;
+
+	*out = sum2;
+	return c1 | c2;
+#endif
+}
+
+// Return the high 64 bits of the 64x64 bit product a*b
+#ifdef _MSC_VER
+#include <intrin.h>
+inline uint64_t _nfg_mul_high(uint64_t a, uint64_t b) { return __umulh(a, b); }
+#elif defined (__SIZEOF_INT128__)
+inline uint64_t bn_mul_high(uint64_t a, uint64_t b) { return (uint64_t)(((unsigned __int128)a * b) >> 64); }
+#else
+inline uint64_t bn_mul_high(uint64_t a, uint64_t b) {
+	uint64_t a_lo = (uint32_t)a;
+	uint64_t a_hi = a >> 32;
+	uint64_t b_lo = (uint32_t)b;
+	uint64_t b_hi = b >> 32;
+
+	uint64_t p0 = a_lo * b_lo;
+	uint64_t p1 = a_hi * b_lo;
+	uint64_t p2 = a_lo * b_hi;
+	uint64_t p3 = a_hi * b_hi;
+
+	uint64_t cy = (p0 >> 32) + (uint32_t)p1 + (uint32_t)p2;
+
+	return p3 + (p1 >> 32) + (p2 >> 32) + (cy >> 32);
+}
+#endif
+
+// Return the low 64 bits of the 64x64 bit product a*b and set carry to the high 64bit
+inline uint64_t _nfg_mul_with_carry(uint64_t a, uint64_t b, uint64_t& carry) {
+	uint64_t prod_hi;
+#if defined(_MSC_VER) && !defined(__clang__) && defined(USE_AVX2_INSTRUCTIONS)
+	uint64_t prod_lo = _umul128(a, b, &prod_hi);
+	prod_lo += carry;
+	if (prod_lo < carry) prod_hi++;
+#elif defined(__SIZEOF_INT128__)
+	unsigned __int128 prod = (unsigned __int128)a * b + carry;
+	uint64_t prod_lo = (uint64_t)prod;
+	prod_hi = (uint64_t)(prod >> 64);
+#else
+	// Fallback to 32-bit if there are no 128-bit extensions
+	uint64_t q_lo = (uint32_t)a, q_hi = a >> 32;
+	uint64_t b_lo = (uint32_t)b, b_hi = b >> 32;
+
+	uint64_t p0 = q_lo * b_lo;
+	uint64_t p1 = q_lo * b_hi;
+	uint64_t p2 = q_hi * b_lo;
+	uint64_t p3 = q_hi * b_hi;
+
+	uint64_t cy = (p0 >> 32) + (uint32_t)p1 + (uint32_t)p2;
+	uint64_t prod_lo = ((p1 + p2) << 32) + (uint32_t)p0 + carry;
+	if (prod_lo < carry) cy++;
+	prod_hi = p3 + (p1 >> 32) + (p2 >> 32) + (cy >> 32);
+#endif
+	carry = prod_hi;
+	return prod_lo;
+}
+
+// Return (dig+(rem<<64))/D and set rem = (dig+(rem<<64))%D 
+inline uint64_t _nfg_div_with_rem(uint64_t& rem, uint64_t dig, uint64_t D) {
+#if defined(_MSC_VER) && !defined(__clang__) && defined(USE_AVX2_INSTRUCTIONS)
+	return _udiv128(rem, dig, D, &rem);
+#elif defined(__SIZEOF_INT128__) && defined(_MSC_VER) // CLang on MSVC has neither _udiv128 nor 128bit division. Use ASM.
+	uint64_t q;
+	__asm__("divq %4"
+		: "=a"(q), "=d"(rem)
+		: "a"(dig), "d"(rem), "r"(D)
+		: "cc");
+	return q;
+#elif defined(__SIZEOF_INT128__) && !defined(_MSC_VER)
+	unsigned __int128 cur = ((unsigned __int128)rem << 64) | dig;
+	rem = (uint64_t)(cur % D);
+	return (uint64_t)(cur / D);
+#else
+	// First half of the limb (upper 32 bits)
+	uint64_t cur = (rem << 32) | (dig >> 32);
+	uint64_t q_hi = cur / D;
+	rem = cur % D;
+
+	// Second half of the limb (lower 32 bits)
+	cur = (rem << 32) | (uint32_t)dig;
+	uint64_t q_lo = cur / D;
+	rem = cur % D;
+
+	return (q_hi << 32) | q_lo;
+#endif
+}
 
 /////////////////////////////////////////////////////////////////////
 // 	   
@@ -695,7 +826,7 @@ inline void add1ULP(bigfloat& f) {
 /////////////////////////////////////////////////////////////////////
 
 // A bignatural is an arbitrarily large non-negative integer.
-// It is made of a sequence of digits in base 2^32.
+// It is made of a sequence of digits in base 2^64.
 // Leading zero-digits are not allowed.
 // The value 'zero' is represented by an empty digit sequence.
 
@@ -703,10 +834,10 @@ class bignatural {
 protected:
 	uint32_t m_capacity;	// Current vector capacity
 	uint32_t m_size;		// Actual number of digits
-	uint32_t* digits;	    // Ptr to the digits
+	uint64_t* digits;	    // Ptr to the digits
 
-	static uint32_t* BN_ALLOC(uint32_t num_bytes);
-	static void BN_FREE(uint32_t* ptr);
+	static uint64_t* BN_ALLOC(uint32_t num_bytes);
+	static void BN_FREE(uint64_t* ptr);
 
 	// Read as many decimal digits as possible from s so that they fit a uint64_t
 	// Return the number of digits read
@@ -746,18 +877,15 @@ public:
 	// If the number fits a uint64_t convert and return true
 	bool toUint64(uint64_t& n) const;
 
-	// If the number fits a uint32_t convert and return true
-	bool toUint32(uint32_t& n) const;
-
 	// Assignment operators
 	bignatural& operator=(const bignatural& m);
 	bignatural& operator=(const uint64_t m);
 
 	// Get the least significant digit
-	const uint32_t& back() const;
+	const uint64_t& back() const;
 
 	// Get the i'th digit
-	const uint32_t& operator[](int i) const;
+	const uint64_t& operator[](int i) const;
 
 	// Number of significant digits
 	uint32_t size() const;
@@ -804,11 +932,10 @@ public:
 
 	bignatural operator*(const bignatural& b) const;
 	bignatural& operator*=(const bignatural& b);
-	bignatural& operator*=(const uint32_t b);
 	bignatural& operator*=(const uint64_t b);
 
 	// Short division
-	bignatural divide_by(const uint32_t D, uint32_t& remainder) const;
+	bignatural divide_by(const uint64_t D, uint64_t& remainder) const;
 
 	// Long division
 	bignatural divide_by(const bignatural& divisor, bignatural& remainder) const;
@@ -818,7 +945,7 @@ public:
 
 	// Bitwise OR
 	bignatural operator|(const bignatural& b) const;
-	void operator|=(uint32_t i);
+	void operator|=(uint64_t i);
 
 	// Greatest common divisor
 	bignatural GCD(const bignatural& D) const;
@@ -836,15 +963,15 @@ public:
 	uint32_t countEndingZeroes() const;
 
 protected:
-	uint32_t& back();
+	uint64_t& back();
 
 	void pop_back();
 
-	uint32_t& operator[](int i);
+	uint64_t& operator[](int i);
 
-	void push_back(uint32_t b);
+	void push_back(uint64_t b);
 
-	// Left-shift. Same as above but assumes that number is not zero!
+	// Left-shift. Same as <<= but assumes that number is not zero!
 	void leftShift(uint32_t n);
 
 	void push_bit_back(uint32_t b);
@@ -853,7 +980,9 @@ protected:
 
 	void resize(uint32_t n);
 
-	void fill(uint32_t v);
+	void fill(uint64_t v);
+
+	void fillWithZeroes() { memset(digits, 0, m_size * sizeof(uint64_t)); }
 
 	void pop_front();
 
@@ -887,20 +1016,20 @@ protected:
 	void toProd(const bignatural& a, const bignatural& b);
 
 	// Short division with no remainder
-	bignatural divide_by_exact(const uint32_t D) const;
+	bignatural divide_by_exact(const uint64_t D) const;
 
 	// Long division with no remainder
 	bignatural divide_by_exact(const bignatural& divisor) const;
 
 private:
 	// Multiplies by a single limb, left shift, and add to accumulator. Does not pack!
-	void addmul(uint32_t b, uint32_t left_shifts, bignatural& result) const;
+	void addmul(uint64_t b, uint32_t left_shifts, bignatural& result) const;
 
 	// Increases the vector capacity while maintaining the number validity
 	void increaseCapacity(uint32_t new_capacity);
 
 	// Adds one most significant digit while making room if necessary
-	void addOneMostSignificantDigit(uint32_t d);
+	void addOneMostSignificantDigit(uint64_t d);
 
 	// Memory pool for bignaturals.
 	inline static thread_local MultiPool nfgMemoryPool;
@@ -939,7 +1068,7 @@ inline std::ostream& operator<<(std::ostream& os, const bignatural& p)
 // Number is zero if mantissa is empty.
 
 class bigfloat {
-	bignatural mantissa; // .back() is less significant. Use 32-bit limbs to avoid overflows using 64-bits
+	bignatural mantissa; // .back() is less significant
 	int32_t exponent; // In principle we might still have under/overflows, but not in practice
 	int32_t sign;	// Redundant but keeps alignment
 
@@ -974,6 +1103,7 @@ public:
 	bool operator==(const bigfloat& b) const;
 	bool operator!=(const bigfloat& b) const;
 	bool operator<(const bigfloat& b) const;
+	bool operator>(const bigfloat& b) const;
 
 	// Sign switch
 	void invert();
@@ -1057,6 +1187,8 @@ public:
 	// Create from explicit numerator, denominator and sign.
 	bigrational(const bignatural& num, const bignatural& den, int32_t s) :
 		numerator(num), denominator(den), sign(s) {	}
+	bigrational(uint32_t num, uint32_t den, int32_t s) :
+		numerator(num), denominator(den), sign(s) { }
 
 	// Convert to multiplicative inverse
 	void invert();
@@ -1083,6 +1215,7 @@ public:
 	bool operator>=(const bigrational& r) const;
 	bool operator<(const bigrational& r) const;
 	bool operator<=(const bigrational& r) const;
+	bool hasEqualModule(const bigrational& r) const;
 	bool hasGreaterModule(const bigrational& r) const;
 	bool hasGrtrOrEqModule(const bigrational& r) const;
 
@@ -1362,21 +1495,19 @@ inline interval_number interval_number::operator*(const interval_number& b) cons
 	// branches in the execution, which increses the processor's throughput.
 
 	// Fill i1 and i2 with two copies of 'this' and 'b' respectively
-	__m256d i1 = _mm256_castpd128_pd256(interval);
-	i1 = _mm256_insertf128_pd(i1, interval, 1);
-	__m256d i2 = _mm256_castpd128_pd256(b.interval);
-	i2 = _mm256_insertf128_pd(i2, b.interval, 1);
+	__m256d i1 = _mm256_setr_m128d(interval, interval);
+	__m256d i2 = _mm256_setr_m128d(b.interval, b.interval);
 
 	// Swizzle and change sign appropriately to produce all the eight configs
-	__m256d x2 = _mm256_shuffle_pd(i1, i1, 5);
-	__m256d x3 = _mm256_xor_pd(i2, _mm256_set_pd(-0.0, -0.0, 0.0, 0.0));
-	__m256d x4 = _mm256_xor_pd(i2, _mm256_set_pd(0.0, 0.0, -0.0, -0.0));
+	__m256d x2 = _mm256_shuffle_pd(i1, i1, 0b0101);
+	__m256d x3 = _mm256_xor_pd(i2, _mm256_setr_pd(0.0, 0.0, -0.0, -0.0));
+	__m256d x4 = _mm256_xor_pd(i2, _mm256_setr_pd(-0.0, -0.0, 0.0, 0.0));
 	x3 = _mm256_mul_pd(i1, x3);
 	x2 = _mm256_mul_pd(x2, x4);
 	x3 = _mm256_max_pd(x3, x2);
-	x4 = _mm256_shuffle_pd(x3, x3, 5);
+	x4 = _mm256_shuffle_pd(x3, x3, 0b0101);
 	x3 = _mm256_max_pd(x3, x4);
-	x3 = _mm256_permute4x64_pd(x3, 72);
+	x3 = _mm256_permute4x64_pd(x3, 0b01001000);
 
 	// The first two vals of the 256 vector are the resulting product
 	return _mm256_castpd256_pd128(x3);
@@ -2548,8 +2679,8 @@ inline expansion operator-(const double& d, const s_expansion& e) {
 
 #ifndef USE_GNU_GMP_CLASSES
 
-inline uint32_t* bignatural::BN_ALLOC(uint32_t num_bytes) { return (uint32_t*)nfgMemoryPool.alloc(num_bytes); }
-inline void bignatural::BN_FREE(uint32_t* ptr) { nfgMemoryPool.release(ptr); }
+inline uint64_t* bignatural::BN_ALLOC(uint32_t num_bytes) { return (uint64_t*)nfgMemoryPool.alloc(num_bytes); }
+inline void bignatural::BN_FREE(uint64_t* ptr) { nfgMemoryPool.release(ptr); }
 inline bignatural::bignatural() : m_capacity(0), m_size(0), digits(NULL) { }
 inline bignatural::~bignatural() { BN_FREE(digits); }
 inline bignatural::bignatural(const bignatural& m) { init(m); }
@@ -2566,9 +2697,9 @@ inline bignatural::bignatural(const char *s) { init(s); }
 
 inline bignatural::bignatural(FILE* f) { init(f); }
 
-inline const uint32_t& bignatural::back() const { return digits[m_size - 1]; }
+inline const uint64_t& bignatural::back() const { return digits[m_size - 1]; }
 
-inline const uint32_t& bignatural::operator[](int i) const { return digits[i]; }
+inline const uint64_t& bignatural::operator[](int i) const { return digits[i]; }
 
 inline uint32_t bignatural::size() const { return m_size; }
 
@@ -2589,20 +2720,20 @@ inline bignatural bignatural::operator-(const bignatural& b) const { bignatural 
 
 inline bignatural& bignatural::operator*=(const bignatural& b) { operator=(*this * b); return *this; }
 
-inline void bignatural::operator|=(uint32_t i) { if (m_size) digits[m_size - 1] |= i; else operator=(i); }
+inline void bignatural::operator|=(uint64_t i) { if (m_size) digits[m_size - 1] |= i; else operator=(i); }
 
-inline uint32_t& bignatural::back() { return digits[m_size - 1]; }
+inline uint64_t& bignatural::back() { return digits[m_size - 1]; }
 
 inline void bignatural::pop_back() { m_size--; }
 
-inline uint32_t& bignatural::operator[](int i) { return digits[i]; }
+inline uint64_t& bignatural::operator[](int i) { return digits[i]; }
 
 inline void bignatural::reserve(uint32_t n) { if (n > m_capacity) increaseCapacity(n); }
 
 inline void bignatural::resize(uint32_t n) { reserve(n); m_size = n; }
 
-inline void bignatural::fill(uint32_t v) {
-	uint32_t *dend = digits + m_size;
+inline void bignatural::fill(uint64_t v) {
+	uint64_t *dend = digits + m_size;
 	while (--dend >= digits) *dend = v;
 }
 
@@ -2612,7 +2743,13 @@ inline uint32_t bignatural::countEndingZeroesLSL() const {
 
 inline void bignatural::init(FILE* fp) {
 	char s[2048]; // Can read up to 2047 decimal digits from file
-	fgets(s, 2047, fp);
+	size_t i = 0;
+	int c = EOF;
+	while (i < sizeof(s) - 1 && (c = fgetc(fp)) != EOF && isdigit((unsigned char)c)) {
+		s[i++] = (char)c;
+	}
+	if (c != EOF) ungetc(c, fp);
+	s[i] = 0;
 	init(s);
 }
 
@@ -2649,8 +2786,8 @@ inline void bignatural::init(const bignatural& m) {
 	m_size = m.m_size;
 	m_capacity = m.m_capacity;
 	if (m_capacity) {
-		digits = (uint32_t*)BN_ALLOC(sizeof(uint32_t) * m_capacity);
-		if (m_size) memcpy(digits, m.digits, sizeof(uint32_t) * m_size);
+		digits = BN_ALLOC(sizeof(uint64_t) * m_capacity);
+		if (m_size) memcpy(digits, m.digits, sizeof(uint64_t) * m_size);
 	}
 	else digits = NULL;
 }
@@ -2660,41 +2797,18 @@ inline void bignatural::init(const uint64_t m) {
 		m_size = m_capacity = 0;
 		digits = NULL;
 	}
-	else if (m <= UINT32_MAX) {
-		m_size = m_capacity = 1;
-		digits = (uint32_t*)BN_ALLOC(sizeof(uint32_t));
-		digits[0] = (uint32_t)m;
-	}
-	else {
-		m_size = m_capacity = 2;
-		digits = (uint32_t*)BN_ALLOC(sizeof(uint32_t) * 2);
-		digits[0] = (uint32_t)(m >> 32);
-		digits[1] = (uint32_t)(m);
-	}
-}
-
-inline void bignatural::init(const uint32_t m) {
-	if (m == 0) {
-		m_size = m_capacity = 0;
-		digits = NULL;
-	}
 	else {
 		m_size = m_capacity = 1;
-		digits = (uint32_t*)BN_ALLOC(sizeof(uint32_t));
+		digits = BN_ALLOC(sizeof(uint64_t));
 		digits[0] = m;
 	}
 }
 
-inline bool bignatural::toUint64(uint64_t& n) const {
-	if (m_size == 0) n = 0;
-	else if (m_size == 1) n = digits[0];
-	else if (m_size == 2) { n = (((uint64_t)digits[0]) << 32) + digits[1]; }
-	else return false;
-
-	return true;
+inline void bignatural::init(const uint32_t m) {
+	init((uint64_t)m);
 }
 
-inline bool bignatural::toUint32(uint32_t& n) const {
+inline bool bignatural::toUint64(uint64_t& n) const {
 	if (m_size == 0) n = 0;
 	else if (m_size == 1) n = digits[0];
 	else return false;
@@ -2706,7 +2820,7 @@ inline bignatural& bignatural::operator=(const bignatural& m) {
 	if (digits != m.digits) {
 		if (m_capacity >= m.m_size) {
 			m_size = m.m_size;
-			if (m_size) memcpy(digits, m.digits, m_size << 2);
+			if (m_size) memcpy(digits, m.digits, sizeof(uint64_t) * m_size);
 		}
 		else {
 			BN_FREE(digits);
@@ -2729,9 +2843,9 @@ inline void bignatural::operator<<=(uint32_t n) {
 }
 
 inline void bignatural::leftShift(uint32_t n) {
-	uint32_t s = n & 0x0000001f;
+	uint32_t s = n & 63U;
 	uint32_t lz = countLeadingZeroes();
-	uint32_t s2 = 32 - s;
+	uint32_t s2 = 64 - s;
 
 	if (lz < s) { // Need a further limb
 		push_back(0);
@@ -2752,9 +2866,9 @@ inline void bignatural::leftShift(uint32_t n) {
 		*dp <<= s;
 	}
 
-	while (n >= 32) {
+	while (n >= 64) {
 		push_back(0);
-		n -= 32;
+		n -= 64;
 	}
 }
 
@@ -2764,16 +2878,16 @@ inline void bignatural::operator>>=(uint32_t n) {
 		return;
 	}
 
-	while (n >= 32) {
+	while (n >= 64) {
 		pop_back();
-		n -= 32;
+		n -= 64;
 	}
 	if (!n) return;
 
 	auto dp = digits, de = digits + m_size;
 	while (dp != --de) {
 		*de >>= n;
-		*de |= ((*(de - 1)) << (32 - n));
+		*de |= ((*(de - 1)) << (64 - n));
 	}
 	if ((*de >>= n) == 0) pop_front();
 }
@@ -2821,26 +2935,24 @@ inline bignatural bignatural::operator|(const bignatural& b) const {
 
 	if (m_size >= b.size()) {
 		result = *this;
-		uint32_t* rd = result.digits + m_size;
-		uint32_t* bd = b.digits + b.m_size;
+		uint64_t* rd = result.digits + m_size;
+		uint64_t* bd = b.digits + b.m_size;
 		do { *--rd |= *--bd; } while (bd != b.digits);
 	}
 	else {
 		result = b;
-		uint32_t* rd = result.digits + m_size;
-		uint32_t* bd = b.digits + b.m_size;
+		uint64_t* rd = result.digits + m_size;
+		uint64_t* bd = b.digits + b.m_size;
 		do { *--rd |= *--bd; } while (rd != result.digits);
 	}
 
 	return result;
 }
 
-inline bignatural bignatural::divide_by(const uint32_t D, uint32_t& remainder) const {
+inline bignatural bignatural::divide_by(const uint64_t D, uint64_t& remainder) const {
 	assert(D != 0);
-	//if (D == 0) ip_error("Division by zero\n");
-	//if (m_size == 0) return 0;
 
-	// If both dividend fits into 64 bits, use hardware division
+	// If possible, use hardware division
 	uint64_t n;
 	if (toUint64(n)) {
 		remainder = n % D;
@@ -2848,57 +2960,48 @@ inline bignatural bignatural::divide_by(const uint32_t D, uint32_t& remainder) c
 	}
 
 	bignatural Q;
-	uint32_t next_digit = 0;
-	uint64_t dividend = digits[next_digit++];
-	for (;;) {
-		uint64_t tmp_div = dividend / D;
-		if (!Q.empty() || tmp_div) Q.push_back((uint32_t)tmp_div);
-		dividend -= (tmp_div * D);
-		if (next_digit < m_size) {
-			dividend <<= 32;
-			dividend += digits[next_digit++];
-		}
-		else break;
+	Q.reserve(m_size);
+	uint64_t rem = 0;
+
+	for (size_t next_digit = 0; next_digit < m_size; next_digit++) {
+		uint64_t q_digit = _nfg_div_with_rem(rem, digits[next_digit], D);
+		if (!Q.empty() || q_digit) Q.push_back(q_digit);
 	}
-	remainder = (uint32_t)dividend;
+	remainder = rem;
 
 	return Q;
 }
 
 // Short division (assumes no remainder)
-inline bignatural bignatural::divide_by_exact(const uint32_t D) const {
+inline bignatural bignatural::divide_by_exact(const uint64_t D) const {
 	assert(D != 0);
 
-	// If dividend fits into 64 bits, use hardware division
+	// If possible, use hardware division
 	uint64_t n;
 	if (toUint64(n)) return n / D;
 
 	bignatural Q;
-	uint32_t next_digit = 0;
-	uint64_t dividend = digits[next_digit++];
-	for (;;) {
-		uint64_t tmp_div = dividend / D;
-		if (!Q.empty() || tmp_div) Q.push_back((uint32_t)tmp_div);
-		dividend -= (tmp_div * D);
-		if (next_digit < m_size) {
-			dividend <<= 32;
-			dividend += digits[next_digit++];
-		}
-		else break;
+	Q.reserve(m_size);
+	uint64_t rem = 0;
+
+	for (size_t next_digit = 0; next_digit < m_size; next_digit++) {
+		uint64_t q_digit = _nfg_div_with_rem(rem, digits[next_digit], D);
+		if (!Q.empty() || q_digit) Q.push_back(q_digit);
 	}
+	assert(rem == 0);
 
 	return Q;
 }
 
 inline uint32_t bignatural::getNumSignificantBits() const {
 	if (!m_size) return 0;
-	return (m_size * 32) - nfg_count_lz(digits[0]);
+	return (m_size * 64) - nfg_count_lz(digits[0]);
 }
 
 inline bool bignatural::getBit(uint32_t b) const {
-	const uint32_t dig = (m_size - (b >> 5)) - 1;
-	const uint32_t bit = b & 31;
-	return (digits[dig] & (1 << bit));
+	const uint32_t dig = (m_size - (b >> 6)) - 1;
+	const uint32_t bit = b & 63;
+	return (digits[dig] & (UINT64_C(1) << bit));
 }
 
 // Long division
@@ -2906,19 +3009,19 @@ inline bignatural bignatural::divide_by(const bignatural& divisor, bignatural& r
 	if (divisor.empty()) ip_error("Division by zero\n");
 	if (empty()) return (uint32_t)0;
 
-	// If divisor fits into 32 bits, revert to short division
-	uint32_t d32, rem;
-	if (divisor.toUint32(d32)) {
-		bignatural q = divide_by(d32, rem);
-		remainder = rem;
-		return q;
-	}
-
 	// If both dividend and divisor fit into 64 bits, use hardware division
 	uint64_t n, d;
 	if (toUint64(n) && divisor.toUint64(d)) {
 		remainder = n % d;
 		return n / d;
+	}
+
+	// If divisor fits into 64 bits, revert to short division
+	uint64_t d64, rem;
+	if (divisor.toUint64(d64)) {
+		bignatural q = divide_by(d64, rem);
+		remainder = rem;
+		return q;
 	}
 
 	// If divisor is greater than dividend...
@@ -2930,10 +3033,9 @@ inline bignatural bignatural::divide_by(const bignatural& divisor, bignatural& r
 	// Use binary (per-bit) long division
 	const bignatural& dividend = *this;
 
-	// Possible optimizations:
-	// Pre-allocate number of bits in quotient (bits dividend - bits divisor + 1)
-
 	bignatural quotient, loc_dividend;
+	quotient.reserve(m_size);
+	loc_dividend.reserve(m_size);
 	uint32_t next_dividend_bit = dividend.getNumSignificantBits();
 
 	do {
@@ -2950,73 +3052,87 @@ inline bignatural bignatural::divide_by(const bignatural& divisor, bignatural& r
 	return quotient;
 }
 
-// Long division which assumes divisor is valid and exact (no remainder)
+// Exact long division (Barrett-Jebelean) - Assume remainder is zero
 inline bignatural bignatural::divide_by_exact(const bignatural& divisor) const {
-	if (empty()) return (uint32_t)0;
+	if (empty()) return (uint64_t)0;
 
-	// If divisor fits into 32 bits, revert to short division
-	uint32_t d32;
-	if (divisor.toUint32(d32))  return divide_by_exact(d32);
+	// If the divisor fits into 64 bits, use short division for 64-bit
+	uint64_t d64;
+	if (divisor.toUint64(d64)) return divide_by_exact(d64);
 
 	// If both dividend and divisor fit into 64 bits, use hardware division
-	uint64_t n64, d64;
-	if (toUint64(n64) && divisor.toUint64(d64)) return n64 / d64;
+	uint64_t n64;
+	if (toUint64(n64)) return n64 / d64; // d64 has already been extracted above
 
 	bignatural A(*this), B(divisor);
 
-	// 1. Shift both A and B until B becomes odd
-	uint32_t az = A.countEndingZeroes();
-	uint32_t bz = B.countEndingZeroes();
-	uint32_t trailing_zeroes = std::min(az, bz);
-	A >>= trailing_zeroes;
-	B >>= trailing_zeroes;
+	// 1. Shift both A and B until B is odd
+	size_t az = A.countEndingZeroes();
+	size_t bz = B.countEndingZeroes();
+	size_t trailing_zeroes = std::min(az, bz);
+	A >>= (uint32_t)trailing_zeroes;
+	B >>= (uint32_t)trailing_zeroes;
 
 	// Number of limbs of B and A
-	uint32_t n = B.size();
-	uint32_t m = A.size();
+	size_t n = B.size();
+	size_t m = A.size();
 
-	uint32_t q_size = m - n + 1;
+	if (m < n) return (uint64_t)0;
+
+	size_t q_size = m - n + 1;
 	bignatural Q;
-	Q.resize(q_size);
-	for (uint32_t i = 0; i < q_size; ++i) Q[i] = 0; // To be optimized. Make another resize with initializer
+	Q.resize((uint32_t)q_size); // Direct initialization to zero
+	Q.fillWithZeroes();
 
-	// 2. Calculate modular inverse of least significant limb of B modulo 2^32
-	uint32_t b = B.back();
-	uint32_t v = (3 * b) ^ 2; // 4 bit initial approximation
-	v *= (2 - b * v); // 8 bit precision
-	v *= (2 - b * v); // 16 bit precision
-	v *= (2 - b * v); // 32 bit precision
+	// 2. Compute the modular inverse of the least significant limb of B modulo 2^64
+	// In Big Endian the least significant limb is the limb at the back
+	uint64_t b = B.back();
+	uint64_t v = (3 * b) ^ 2; // Initial approximation to 4 bits
+	v *= (2 - b * v); // 8 bits
+	v *= (2 - b * v); // 16 bits
+	v *= (2 - b * v); // 32 bits
+	v *= (2 - b * v); // 64 bits of precision for 64-bit limb
+	// 3. Jebelean's main loop (Right-to-Left)
+	for (size_t i = 0; i < q_size; ++i) {
+		// Index of the current limb of A starting from the right (Big Endian)
+		size_t a_idx = m - 1 - i;
 
-	// 3. Jebelean main loop (Right-to-Left)
-	for (uint32_t i = 0; i < q_size; ++i) {
-		if (A[i] == 0) {
-			Q[i] = 0;
+		if (A[(int)a_idx] == 0) {
+			Q[(int)(q_size - 1 - i)] = 0;
 		}
 		else {
-			// Calculate i-th digit
-			uint32_t q_i = A[i] * v;
-			Q[i] = q_i;
+			// Compute the i-th limb of the quotient
+			uint64_t q_i = A[(int)a_idx] * v;
+			Q[(int)(q_size - 1 - i)] = q_i;
 
-			uint64_t carry = 0, borrow = 0;
+			uint64_t carry = 0;
+			uint64_t borrow = 0;
 
-			for (uint32_t j = 0; j < n; ++j) {
-				uint64_t prod = static_cast<uint64_t>(q_i) * B[j] + carry;
-				uint32_t prod_low = static_cast<uint32_t>(prod);
-				carry = prod >> 32;
+			for (size_t j = 0; j < n; ++j) {
+				size_t b_idx = n - 1 - j;
+				size_t target_idx = m - 1 - i - j;
 
-				uint64_t diff = static_cast<uint64_t>(A[i + j]) - prod_low - borrow;
-				A[i + j] = static_cast<uint32_t>(diff);
+				// 128-bit multiplication: prod_hi:prod_lo = q_i * B[b_idx] + carry
+				uint64_t prod_lo = _nfg_mul_with_carry(q_i, B[(int)b_idx], carry);
 
-				borrow = (diff > 0xFFFFFFFFULL) ? 1 : 0;
+				// Subtraction with borrow: A[target_idx] - prod_lo - borrow
+				uint64_t cur_a = A[(int)target_idx];
+				uint64_t sub = prod_lo + borrow;
+				uint64_t new_borrow = (sub < prod_lo) || (cur_a < sub) ? 1 : 0;
+
+				A[(int)target_idx] = cur_a - sub;
+				borrow = new_borrow;
 			}
 
-			uint32_t k = i + n;
+			// Propagation of remaining carry and borrow to the left
+			size_t k = i + n;
 			while ((carry > 0 || borrow > 0) && k < m) {
+				size_t k_idx = m - 1 - k;
+				uint64_t cur_a = A[(int)k_idx];
 				uint64_t sub = carry + borrow;
-				uint64_t diff = static_cast<uint64_t>(A[k]) - sub;
-				A[k] = static_cast<uint32_t>(diff);
 
-				borrow = (diff > 0xFFFFFFFFULL) ? 1 : 0;
+				borrow = (cur_a < sub) ? 1 : 0;
+				A[(int)k_idx] = cur_a - sub;
 				carry = 0;
 				k++;
 			}
@@ -3057,24 +3173,24 @@ inline bignatural bignatural::sqrt() const
 
 inline void bignatural::increaseCapacity(uint32_t new_capacity) {
 	m_capacity = new_capacity;
-	uint32_t* tmp_d = (uint32_t*)BN_ALLOC(sizeof(uint32_t) * m_capacity);
-	if (m_size) memcpy(tmp_d, digits, sizeof(uint32_t) * m_size);
+	uint64_t* tmp_d = (uint64_t*)BN_ALLOC(sizeof(uint64_t) * m_capacity);
+	if (m_size) memcpy(tmp_d, digits, sizeof(uint64_t) * m_size);
 	BN_FREE(digits);
 	digits = tmp_d;
 }
 
 // Add one most significant digit to this number and make room for it if necessary
-inline void bignatural::addOneMostSignificantDigit(uint32_t d) {
+inline void bignatural::addOneMostSignificantDigit(uint64_t d) {
 	if (m_capacity == m_size) {
 		m_capacity++;
-		uint32_t* tmp_d = (uint32_t*)BN_ALLOC(sizeof(uint32_t) * m_capacity);
-		if (m_size) memcpy(tmp_d + 1, digits, sizeof(uint32_t) * m_size);
+		uint64_t* tmp_d = (uint64_t*)BN_ALLOC(sizeof(uint64_t) * m_capacity);
+		if (m_size) memcpy(tmp_d + 1, digits, sizeof(uint64_t) * m_size);
 		BN_FREE(digits);
 		digits = tmp_d;
 		digits[0] = d;
 	}
 	else { // m_capacity > m_size
-		uint32_t* td = digits + m_size;
+		uint64_t* td = digits + m_size;
 		while (--td != digits) *(td + 1) = *td;
 		*(td + 1) = *td;
 		*td = d;
@@ -3093,7 +3209,7 @@ inline bignatural bignatural::GCD(const bignatural& B) const {
 inline bool bignatural::coprime(const bignatural& B) const {
 	if (empty() || B.empty()) return true;
 	if (!(back() & (1UL)) && !(B.back() & (1UL))) return false; // Both numbers are even
-	return !GCD_non_zero(B).isOne();
+	return GCD_non_zero(B).isOne();
 }
 
 inline bignatural bignatural::GCD_non_zero(const bignatural& B) const {
@@ -3122,7 +3238,7 @@ inline bignatural bignatural::GCD_non_zero(const bignatural& B) const {
 inline std::string bignatural::get_dec_str() const {
 	std::string st;
 	bignatural N = *this;
-	uint32_t R;
+	uint64_t R;
 	if (N.empty()) return "0";
 	while (!N.empty()) {
 		N = N.divide_by(10, R);
@@ -3136,11 +3252,11 @@ inline std::string bignatural::get_dec_str() const {
 // String representation in binary form
 inline std::string bignatural::get_str() const {
 	std::string st;
-	char s[33];
-	s[32] = 0;
+	char s[65];
+	s[64] = 0;
 	for (uint32_t j = 0; j < m_size; j++) {
-		for (int i = 0; i < 32; i++)
-			s[i] = (digits[j] & (((uint32_t)1) << (31 - i))) ? '1' : '0';
+		for (int i = 0; i < 64; i++)
+			s[i] = (digits[j] & (UINT64_C(1) << (63 - i))) ? '1' : '0';
 		st += s;
 	}
 	return st;
@@ -3151,7 +3267,7 @@ inline uint32_t bignatural::countEndingZeroes() const {
 	if (m_size == 0) return 0;
 	uint32_t i = m_size;
 	uint32_t shft = 0;
-	while (!digits[--i])  shft += 32;
+	while (!digits[--i])  shft += 64;
 
 	return shft + nfg_count_rz(digits[i]);
 }
@@ -3166,66 +3282,52 @@ inline void bignatural::toSum(const bignatural& a, const bignatural& b) {
 }
 
 inline bignatural& bignatural::operator+=(const bignatural& b) {
-	if (&b == this) { // If b is this same number just multiply by two
-		operator<<=(1U);
-		return *this;
-	}
-
 	if (m_size == 0) return operator=(b);
-	else if (b.m_size == 0) return *this;
-	else {
+	else if (&b == this) { // If b is this same number just multiply by two
+		operator<<=(1U);
+	}
+	else if (b.m_size != 0) {
 		const uint32_t a_s = m_size;
 		const uint32_t b_s = b.m_size;
-		uint64_t carry = 0;
-		uint32_t* dig_b = b.digits + b_s;
+		unsigned char carry = 0;
+		uint64_t* __restrict dig_b = b.digits + b_s;
 
 		if (a_s > b_s) {
-			uint32_t* dig_a = digits + a_s;
+			uint64_t* __restrict dig_a = digits + a_s;
 			do {
-				const uint64_t da = *(--dig_a);
-				const uint64_t db = *(--dig_b);
-				const uint64_t sm = da + db + carry;
-				*(dig_a) = (uint32_t)sm;
-				carry = (sm >> 32);
+				dig_a--; dig_b--;
+				carry = _nfg_add_with_carry(carry, *dig_a, *dig_b, dig_a);
 			} while (dig_b != b.digits);
 			do {
-				const uint64_t da = *(--dig_a);
-				const uint64_t sm = da + carry;
-				*(dig_a) = (uint32_t)sm;
-				carry = (sm >> 32);
+				dig_a--;
+				carry = _nfg_add_with_carry(carry, *dig_a, 0, dig_a);
 			} while (dig_a != digits);
 		}
 		else if (a_s == b_s) {
-			uint32_t* dig_a = digits + a_s;
+			uint64_t* __restrict dig_a = digits + a_s;
 			do {
-				const uint64_t da = *(--dig_a);
-				const uint64_t db = *(--dig_b);
-				const uint64_t sm = da + db + carry;
-				*(dig_a) = (uint32_t)sm;
-				carry = (sm >> 32);
+				dig_a--; dig_b--;
+				carry = _nfg_add_with_carry(carry, *dig_a, *dig_b, dig_a);
 			} while (dig_b != b.digits);
 		}
 		else { // if (a_s < b_s)
-			resize(b_s);
-			uint32_t* dig_a = digits + a_s;
-			uint32_t* dig_r = digits + b_s;
+			reserve(b_s + 1); // This might be a bit wasteful, but avoids a second allocation in case of carry
+			m_size = b_s;
+			uint64_t* __restrict dig_a = digits + a_s;
+			uint64_t* __restrict dig_r = digits + b_s;
 			do {
-				const uint64_t da = *(--dig_a);
-				const uint64_t db = *(--dig_b);
-				const uint64_t sm = da + db + carry;
-				*(--dig_r) = (uint32_t)sm;
-				carry = (sm >> 32);
+				dig_a--; dig_b--; dig_r--;
+				carry = _nfg_add_with_carry(carry, *dig_a, *dig_b, dig_r);
 			} while (dig_a != digits);
 			do {
-				const uint64_t db = *(--dig_b);
-				const uint64_t sm = db + carry;
-				*(--dig_r) = (uint32_t)sm;
-				carry = (sm >> 32);
+				dig_b--; dig_r--;
+				carry = _nfg_add_with_carry(carry, 0, *dig_b, dig_r);
 			} while (dig_b != b.digits);
 		}
 
-		if (carry) addOneMostSignificantDigit((uint32_t)carry);
+		if (carry) addOneMostSignificantDigit((uint64_t)carry);
 	}
+
 	return *this;
 }
 
@@ -3238,24 +3340,23 @@ inline bignatural& bignatural::operator-=(const bignatural& b) {
 	assert(operator>=(b));
 
 	if (b.m_size) {
-		uint64_t da, db, debt = 0;
-		uint32_t* dig_a = digits + m_size;
-		const uint32_t* dig_b = b.digits + b.m_size;
+		uint64_t da, db, borrow = 0;
+		uint64_t* dig_a = digits + m_size;
+		const uint64_t* dig_b = b.digits + b.m_size;
 
 		do {
 			da = *(--dig_a);
-			db = *(--dig_b) + debt;
-			debt = (da < db);
-			da += (debt << 32);
-			*(dig_a) = (uint32_t)(da - db);
+			uint64_t digit_b = *(--dig_b);
+			db = digit_b + borrow;
+			borrow = (db < digit_b) || (da < db);
+			*(dig_a) = da - db;
 		} while (dig_b != b.digits);
 
 		while (dig_a != digits) {
 			da = *(--dig_a);
-			db = debt;
-			debt = (da < db);
-			da += (debt << 32);
-			*(dig_a) = (uint32_t)(da - db);
+			db = borrow;
+			borrow = (da < db);
+			*(dig_a) = da - db;
 		}
 
 		pack();
@@ -3266,36 +3367,128 @@ inline bignatural& bignatural::operator-=(const bignatural& b) {
 
 inline void bignatural::toProd(const bignatural& a, const bignatural& b) {
 	assert(m_size == 0 && m_capacity == 0); // This assumes that the number is zero!
-	if (a.empty()) operator=(a);
-	else if (b.empty()) operator=(b);
-	else {
-		// Uses the naive multiplication. This is the best choice for not-too-large factors
-		// Consider implementing Karatsuba's algorithm for larger numbers
-		m_size = m_capacity = (a.m_size + b.m_size);
-		digits = (uint32_t*)BN_ALLOC(sizeof(uint32_t) * m_capacity);
-		memset(digits, 0, m_size << 2);
+	const uint32_t N = a.size(), M = b.size();
+	if (N && M) {
+		m_size = m_capacity = (N+M);
+		digits = (uint64_t*)BN_ALLOC(sizeof(uint64_t) * m_capacity);
 
+// Uses O(N*M) multiplication. This is the best choice for not-too-large factors
+// Consider implementing Karatsuba's algorithm for larger numbers
+#if defined(_MSC_VER) && defined(USE_AVX2_INSTRUCTIONS)
+		// Urdhva Tiryagbhyam multiplication algorithm (vertical and crosswise)
+		uint64_t acc_lo = 0, acc_hi = 0, acc_extra = 0;
+
+		uint32_t kM = N - 1;
+		for (uint32_t k = kM + M; k >= 1; --k, --kM) {
+			uint32_t start_i = (k > M) ? (kM) : 0;
+			uint32_t end_i = (k < N) ? (k) : (N);
+			uint32_t j = k - start_i - 1;
+			for (uint32_t i = start_i; i < end_i; ++i, j--) {
+				uint64_t p_hi;
+				uint64_t p_lo = _umul128(a[i], b[j], &p_hi);
+				uint8_t carry = _nfg_add_with_carry(0, acc_lo, p_lo, &acc_lo);
+				acc_extra += _nfg_add_with_carry(carry, acc_hi, p_hi, &acc_hi);
+			}
+			digits[k] = acc_lo;
+
+			acc_lo = acc_hi;
+			acc_hi = acc_extra;
+			acc_extra = 0;
+		}
+		if (acc_lo)  digits[0] = acc_lo;
+		else memmove(digits, digits + 1, sizeof(uint64_t) * (--m_size));
+#elif defined(__SIZEOF_INT128__)
+		// Urdhva Tiryagbhyam multiplication algorithm (vertical and crosswise)
+		__uint128_t acc = 0;
+		uint64_t acc_extra = 0;
+
+		uint32_t kM = N - 1;
+		for (uint32_t k = kM + M; k >= 1; --k, --kM) {
+			uint32_t start_i = (k > M) ? (kM) : 0;
+			uint32_t end_i = (k < N) ? (k) : (N);
+			uint32_t j = k - start_i - 1;
+
+			for (uint32_t i = start_i; i < end_i; ++i, j--) {
+				__uint128_t prod = (__uint128_t)a[i] * b[j];
+				acc += prod;
+				if (acc < prod) acc_extra++;
+			}
+			digits[k] = (uint64_t)acc;
+
+			acc = (acc >> 64) | ((__uint128_t)acc_extra << 64);
+			acc_extra = 0;
+		}
+		if (acc != 0)  digits[0] = (uint64_t)acc;
+		else memmove(digits, digits + 1, sizeof(uint64_t) * (--m_size));
+#else
+		// Naive schoolbook multiplication
+		memset(digits, 0, m_size * sizeof(uint64_t));
 		uint32_t ls = 0;
-		for (uint32_t* d = b.digits + b.m_size; d != b.digits;) a.addmul(*(--d), ls++, *this);
+		for (uint64_t* d = b.digits + b.m_size; d != b.digits;) a.addmul(*(--d), ls++, *this);
 
-		pack();
+		if (digits[0] == 0) memmove(digits, digits + 1, sizeof(uint64_t) * (--m_size));
+#endif
 	}
 }
 
-inline void bignatural::addmul(uint32_t b, uint32_t left_shifts, bignatural& result) const {
-	uint64_t carry = 0;
-	uint32_t* dp = digits + m_size;
-	uint32_t* rp = result.digits + result.m_size - left_shifts;
-	do {
-		uint64_t pm = ((uint64_t)(*(--dp))) * b + carry + (*(--rp));
-		*rp = (uint32_t)pm;
-		carry = pm >> 32;
-	} while (dp != digits);
+inline void bignatural::addmul(uint64_t b, uint32_t left_shifts, bignatural& result) const {
+	const uint64_t* __restrict dp = digits + m_size;
+	uint64_t* __restrict rp = result.digits + result.m_size - left_shifts;
 
-	*(--rp) = (uint32_t)carry;
+	uint64_t hi, lo, pm = 0;
+	while (dp != digits) {
+		dp--; rp--;
+
+#if defined(_MSC_VER) && defined(USE_AVX2_INSTRUCTIONS)
+		// MSVC on x64: Use native hardware intrinsics
+		lo = _umul128(*dp, b, &hi);
+		hi += _nfg_add_with_carry(0, *rp, lo, rp);
+		hi += _nfg_add_with_carry(0, *rp, pm, rp);
+
+#elif defined(__SIZEOF_INT128__)
+		// GCC / Clang on 64-bit: Use native unsigned __int128 extension
+		unsigned __int128 prod = (unsigned __int128)(*dp) * b;
+		lo = (uint64_t)prod;
+		hi = (uint64_t)(prod >> 64);
+
+		// Accumulate *rp + lo + pm while tracking high-word carry
+		unsigned __int128 sum = (unsigned __int128)(*rp) + lo + pm;
+		*rp = (uint64_t)sum;
+		hi += (uint64_t)(sum >> 64);
+
+#else
+		// Portable fallback in standard C++ (32-bit splitting)
+		uint64_t u_lo = (uint32_t)(*dp), u_hi = (*dp) >> 32;
+		uint64_t v_lo = (uint32_t)b, v_hi = b >> 32;
+
+		uint64_t p0 = u_lo * v_lo;
+		uint64_t p1 = u_lo * v_hi;
+		uint64_t p2 = u_hi * v_lo;
+		uint64_t p3 = u_hi * v_hi;
+
+		uint64_t cy = (p0 >> 32) + (uint32_t)p1 + (uint32_t)p2;
+		lo = ((p1 + p2) << 32) + (uint32_t)p0;
+		hi = p3 + (p1 >> 32) + (p2 >> 32) + (cy >> 32);
+
+		// Accumulate *rp, lo, and pm into the target limb with carry handling
+		uint64_t cur_r = *rp;
+		uint64_t sum1 = cur_r + lo;
+		uint64_t c1 = (sum1 < cur_r) ? 1 : 0;
+
+		uint64_t sum2 = sum1 + pm;
+		uint64_t c2 = (sum2 < sum1) ? 1 : 0;
+
+		*rp = sum2;
+		hi += c1 + c2;
+#endif
+
+		pm = hi;
+	}
+
+	*(--rp) = pm;
 }
 
-inline void bignatural::push_back(uint32_t b) {
+inline void bignatural::push_back(uint64_t b) {
 	if (m_size == m_capacity) increaseCapacity((m_capacity | 1) << 2);
 	digits[m_size++] = b;
 }
@@ -3309,7 +3502,7 @@ inline void bignatural::push_bit_back(uint32_t b) {
 }
 
 inline void bignatural::pop_front() {
-	uint32_t* d = digits, * de = digits + m_size;
+	uint64_t* d = digits, * de = digits + m_size;
 	while (++d != de) *(d - 1) = *d;
 	pop_back();
 }
@@ -3319,9 +3512,9 @@ inline void bignatural::pack() {
 	while (i < m_size && digits[i] == 0) i++;
 
 	if (i) {
-		uint32_t* dold = digits + i;
-		uint32_t* dnew = digits;
-		uint32_t* dend = digits + m_size;
+		uint64_t* dold = digits + i;
+		uint64_t* dnew = digits;
+		uint64_t* dend = digits + m_size;
 		while (dold < dend) *dnew++ = *dold++;
 		m_size -= i;
 	}
@@ -3331,13 +3524,13 @@ inline void bignatural::pack() {
 inline bignatural& bignatural::operator+=(const uint32_t b) {
 	if (b != 0) {
 		if (m_size) {
-			uint64_t pm = ((uint64_t)digits[(int)(m_size - 1)]) + b;
-			digits[(int)m_size - 1] = (uint32_t)(pm);
-			uint64_t carry = pm >> 32;
+			uint64_t pm = digits[(int)(m_size - 1)] + b;
+			digits[(int)m_size - 1] = pm;
+			uint64_t carry = pm < b;
 			for (uint32_t i = m_size - 1; carry && i > 0; i--) {
-				pm = ((uint64_t)digits[(int)(i - 1)]) + carry;
-				digits[(int)i - 1] = (uint32_t)(pm);
-				carry = pm >> 32;
+				pm = digits[(int)(i - 1)] + carry;
+				digits[(int)i - 1] = pm;
+				carry = (pm == 0);
 			}
 			if (carry) addOneMostSignificantDigit((uint32_t)carry);
 		}
@@ -3352,17 +3545,18 @@ inline bignatural& bignatural::operator+=(const uint64_t b) {
 	else return operator+=(bignatural(b));
 }
 
-inline bignatural& bignatural::operator*=(const uint32_t b) {
+inline bignatural& bignatural::operator*=(const uint64_t b) {
 	if (m_size) {
 		if (b == 0) return operator=(0U);
-		uint32_t* da = digits + m_size;
-		uint64_t pm = ((uint64_t)(*(--da))) * b;
-		*da = (uint32_t)(pm);
-		uint64_t carry = pm >> 32;
+		uint64_t* da = digits + m_size;
+		uint64_t carry = 0;
 		while (da != digits) {
-			pm = ((uint64_t)(*(--da))) * b + carry;
-			*da = (uint32_t)(pm);
-			carry = pm >> 32;
+			--da;
+			uint64_t lo = (*da) * b;
+			uint64_t hi = _nfg_mul_high(*da, b);
+			uint64_t sum = lo + carry;
+			carry = hi + (sum < lo);
+			*da = sum;
 		}
 
 		if (carry) addOneMostSignificantDigit((uint32_t)carry);
@@ -3370,12 +3564,6 @@ inline bignatural& bignatural::operator*=(const uint32_t b) {
 
 	return *this;
 }
-
-inline bignatural& bignatural::operator*=(const uint64_t b) {
-	if (b < UINT32_MAX) return operator*=((uint32_t)b);
-	else return operator*=(bignatural(b));
-}
-
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 //
@@ -3418,6 +3606,10 @@ inline bool bigfloat::operator<(const bigfloat& b) const {
 	}
 }
 
+inline bool bigfloat::operator>(const bigfloat& b) const {
+	return b.operator<(*this);
+}
+
 inline void bigfloat::invert() { sign = -sign; }
 
 inline int bigfloat::sgn() const { return sign; }
@@ -3442,8 +3634,7 @@ inline bigfloat::bigfloat(const double d) {
 	if (sign) {
 		uint64_t dn = *((uint64_t*)(&d));
 		const uint64_t m = (dn & 0x000fffffffffffff) + 0x0010000000000000;
-		mantissa.push_back(m >> 32);
-		mantissa.push_back((uint32_t)m);
+		mantissa.push_back(m);
 		dn <<= 1;
 		dn >>= 53;
 		exponent = ((int32_t)dn) - 1075; // Exp
@@ -3454,45 +3645,29 @@ inline bigfloat::bigfloat(const double d) {
 }
 
 inline double bigfloat::get_d() const {
-	uint64_t dn = 0;
 	if (mantissa.empty()) return 0.0;
 
-	uint64_t m;
-	int32_t e;
-	uint32_t shft;
+	// Reconstruct the mantissa starting from the first two limbs (if available) and normalize it to the 52-bit precision of a double
+	const uint32_t lz = mantissa.countLeadingZeroes() + 1; // +1 to account for the implicit leading 1 in normalized doubles
+	uint64_t m = mantissa[0] << lz;
+	if (mantissa.size() > 1) m |= (mantissa[1] >> (64 - lz));
+	m >>= 12; // Keep only the 52 most significant bits of the mantissa
 
-	if (mantissa.size() == 1) {
-		m = ((uint64_t)mantissa[0]);
-		shft = mantissa.countLeadingZeroes() + 21;
-		m <<= shft;
-		e = exponent - (int32_t)shft;
-	}
-	else {
-		m = (((uint64_t)mantissa[0]) << 32) | ((uint64_t)mantissa[1]);
-		e = exponent + 32 * ((int32_t)mantissa.size() - 2);
-		shft = mantissa.countLeadingZeroes();
+	const uint32_t nsb = mantissa.size() * 64 - lz; // Number of significant bits in mantissa (not counting the implcit leading 1)
 
-		if (shft < 11) {
-			m >>= (11 - shft);
-			e += (11 - shft);
-		}
-		if (shft > 11) {
-			m <<= (shft - 11);
-			e -= (shft - 11);
-			if (mantissa.size() > 2) m |= (mantissa[2] >> (43 - shft));
-		}
-	}
-	m &= (~0x0010000000000000); // Remove implicit digit
-	e += 52;
+	// Reconstruct the exponent and handle special cases (underflow, overflow)
+	int32_t exp = exponent + 1023 + nsb; // Adjust the exponent to the double's bias and to account for unused mantissa bits
+	if (exp <= 0) return 0.0; // Underflow
+	else if (exp >= 2047) return sign < 0 ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity(); // Overflow
+	uint64_t ne = (uint64_t)exp;
+	ne <<= 52;
+	m |= ne;
 
-	if (e < (-1022)) return 0.0;
-	if (e > 1023) return ((double)sign) * INFINITY;
+	// Set the sign bit if the number is negative
+	if (sign < 0) m |= 0x8000000000000000; // Set the sign bit if negative
 
-	if (sign < 0) dn |= 0x8000000000000000; // Set sign
-	dn |= (((uint64_t)(e + 1023)) << 52); // Set exponent
-	dn |= m; // Set mantissa
-
-	return *((double*)(&dn));
+	// Convert to double and return
+	return *((double*)(&m));
 }
 
 inline bigfloat bigfloat::operator+(const bigfloat& b) const {
@@ -3597,13 +3772,13 @@ inline void bigfloat::pack() {
 
 	while (mantissa.back() == 0) {
 		mantissa.pop_back();
-		exponent += 32;
+		exponent += 64;
 	}
 
 	const uint32_t s = mantissa.countEndingZeroesLSL();
 	if (s) {
 		auto dp = mantissa.digits, de = mantissa.digits + mantissa.m_size - 1;
-		const uint32_t ts = 32 - s;
+		const uint32_t ts = 64 - s;
 		while (dp != de) {
 			*de >>= s;
 			*de |= ((*(de - 1)) << ts);
@@ -3677,11 +3852,11 @@ inline bigrational bigrational::operator/(const bigrational& r) const {
 }
 
 inline bool bigrational::operator==(const bigrational& r) const {
-	return (sign == r.sign && numerator == r.numerator && denominator == r.denominator);
+	return (sign == r.sign && hasEqualModule(r));
 }
 
 inline bool bigrational::operator!=(const bigrational& r) const {
-	return (sign != r.sign || numerator != r.numerator || denominator != r.denominator);
+	return (sign != r.sign || !hasEqualModule(r));
 }
 
 inline bool bigrational::operator>(const bigrational& r) const {
@@ -3702,6 +3877,10 @@ inline bool bigrational::operator<=(const bigrational& r) const {
 
 inline bool bigrational::hasGreaterModule(const bigrational& r) const {
 	return numerator * r.denominator > r.numerator * denominator;
+}
+
+inline bool bigrational::hasEqualModule(const bigrational& r) const {
+	return numerator * r.denominator == r.numerator * denominator;
 }
 
 inline bool bigrational::hasGrtrOrEqModule(const bigrational& r) const {
@@ -3750,6 +3929,7 @@ inline void bigrational::init(FILE* fp) {
 		while (num_digits--) denominator *= 10U;
 		numerator *= denominator;
 		numerator += decimal_part;
+		canonicalize();
 	}
 	else {
 		if (c != EOF) ungetc(c, fp);
@@ -3853,7 +4033,7 @@ inline bigfloat bigrational::get_bigfloat(uint32_t num_significant_bits) const {
 	for (uint32_t i = 0; i <= num_significant_bits; i++) {
 		mantissa <<= 1;
 		if (num >= den) {
-			mantissa |= 1;
+			mantissa |= 1ULL;
 			num = num - den;
 		}
 		num <<= 1;
