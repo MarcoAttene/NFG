@@ -45,7 +45,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
+#include <cstdint>
 #include <float.h>
 #include <math.h>
 #include <cmath>
@@ -85,6 +85,7 @@
 #	else
 #		ifdef USE_SIMD_INSTRUCTIONS
 #			ifdef USE_AVX2_INSTRUCTIONS
+#				include <intrin.h>
 #				include <immintrin.h>
 #			else
 #				include <emmintrin.h>
@@ -122,6 +123,13 @@ inline void ip_error(const char* msg)
 	exit(0);
 }
 
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// 	   
+// C O M P I L E R   A N D   A R C H I T E C T U R E - D E P E N D E N T   F U N C T I O N S
+// 
+////////////////////////////////////////////////////////////////////////////////////////////
+
 #ifdef STDCPLUSPLUS20
 #include <bit>
 inline int nfg_count_lz(uint32_t v) { return std::countl_zero(v); }
@@ -129,31 +137,90 @@ inline int nfg_count_rz(uint32_t v) { return std::countr_zero(v); }
 inline int nfg_count_lz(uint64_t v) { return std::countl_zero(v); }
 inline int nfg_count_rz(uint64_t v) { return std::countr_zero(v); }
 #else
-// Slower versions of the above functions for C++ standards < 20
+
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__has_builtin) // GCC and Clang (x86-64, AMD64, ARM64)
+inline int nfg_count_lz(uint32_t v) { return (v == 0) ? (32) : (__builtin_clz(v)); }
+inline int nfg_count_rz(uint32_t v) { return (v == 0) ? (32) : (__builtin_ctz(v)); }
+inline int nfg_count_lz(uint64_t v) { return (v == 0) ? (64) : (__builtin_clzll(v)); }
+inline int nfg_count_rz(uint64_t v) { return (v == 0) ? (64) : (__builtin_ctzll(v)); }
+#elif defined(_MSC_VER) // MSVC (cl.exe and clang-cl on x86-64, AMD64, ARM64)
 inline int nfg_count_lz(uint32_t v) {
-	int z = 32;
-	while (v) { v >>= 1; z--; }
-	return z;
+	if (v == 0) return 32;
+	unsigned long index;
+	_BitScanReverse(&index, v);
+	return 31 - static_cast<int>(index);
 }
 
 inline int nfg_count_rz(uint32_t v) {
-	int z = 32;
-	while (v) { v <<= 1; z--; }
-	return z;
+	if (v == 0) return 32;
+	unsigned long index;
+	_BitScanForward(&index, v);
+	return static_cast<int>(index);
 }
 
 inline int nfg_count_lz(uint64_t v) {
-	int z = 64;
-	while (v) { v >>= 1; z--; }
-	return z;
+	if (v == 0) return 64;
+	unsigned long index;
+	_BitScanReverse64(&index, v);
+	return 63 - static_cast<int>(index);
 }
 
 inline int nfg_count_rz(uint64_t v) {
-	int z = 64;
-	while (v) { v <<= 1; z--; }
-	return z;
+	if (v == 0) return 64;
+	unsigned long index;
+	_BitScanForward64(&index, v);
+	return static_cast<int>(index);
 }
+#else // Portable
+inline int nfg_count_lz(uint32_t v) {
+	if (v == 0) return 32;
+	int count = 0;
+	if ((v & 0xFFFF0000U) == 0) { count += 16; v <<= 16; }
+	if ((v & 0xFF000000U) == 0) { count += 8;  v <<= 8; }
+	if ((v & 0xF0000000U) == 0) { count += 4;  v <<= 4; }
+	if ((v & 0xC0000000U) == 0) { count += 2;  v <<= 2; }
+	if ((v & 0x80000000U) == 0) { count += 1; }
+	return count;
+}
+
+inline int nfg_count_rz(uint32_t v) {
+	if (v == 0) return 32;
+	int count = 0;
+	if ((v & 0x0000FFFFU) == 0) { count += 16; v >>= 16; }
+	if ((v & 0x000000FFU) == 0) { count += 8;  v >>= 8; }
+	if ((v & 0x0000000FU) == 0) { count += 4;  v >>= 4; }
+	if ((v & 0x00000003U) == 0) { count += 2;  v >>= 2; }
+	if ((v & 0x00000001U) == 0) { count += 1; }
+	return count;
+}
+
+
+inline int nfg_count_lz(uint64_t v) {
+	if (v == 0) return 64;
+	int count = 0;
+	if ((v & 0xFFFFFFFF00000000ULL) == 0) { count += 32; v <<= 32; }
+	if ((v & 0xFFFF000000000000ULL) == 0) { count += 16; v <<= 16; }
+	if ((v & 0xFF00000000000000ULL) == 0) { count += 8;  v <<= 8; }
+	if ((v & 0xF000000000000000ULL) == 0) { count += 4;  v <<= 4; }
+	if ((v & 0xC000000000000000ULL) == 0) { count += 2;  v <<= 2; }
+	if ((v & 0x8000000000000000ULL) == 0) { count += 1; }
+	return count;
+}
+
+inline int nfg_count_rz(uint64_t v) {
+	if (v == 0)	return 64;
+	int count = 0;
+	if ((v & 0x00000000FFFFFFFFULL) == 0) { count += 32; v >>= 32; }
+	if ((v & 0x000000000000FFFFULL) == 0) { count += 16; v >>= 16; }
+	if ((v & 0x00000000000000FFULL) == 0) { count += 8;  v >>= 8; }
+	if ((v & 0x000000000000000FULL) == 0) { count += 4;  v >>= 4; }
+	if ((v & 0x0000000000000003ULL) == 0) { count += 2;  v >>= 2; }
+	if ((v & 0x0000000000000001ULL) == 0) { count += 1; }
+	return count;
+}
+
 #endif
+#endif // STDCPLUSPLUS20
 
 // Set out = a + b + carry and return 1 if overflow occurs (i.e. if sum exceeds 64 bits)
 inline uint8_t _nfg_add_with_carry(uint8_t carry, uint64_t a, uint64_t b, uint64_t* out) {
@@ -161,12 +228,13 @@ inline uint8_t _nfg_add_with_carry(uint8_t carry, uint64_t a, uint64_t b, uint64
 	// 1. MSVC (x64 / ARM64): Uses hardware intrinsic directly
 	return _addcarry_u64(carry, a, b, reinterpret_cast<unsigned __int64*>(out));
 
-#elif defined(__has_builtin) && __has_builtin(__builtin_addcl)
+#elif defined(__clang__) && defined(__has_builtin) 
+ #if __has_builtin(__builtin_addcll)
 	// 2. Clang (x86/x64, ARM64, RISC-V): Clang's architecture-agnostic builtin
 	unsigned long long carry_out = 0;
-	*out = __builtin_addcl(a, b, carry, &carry_out);
+	*out = __builtin_addcll(a, b, carry, &carry_out);
 	return static_cast<uint8_t>(carry_out);
-
+#endif
 #elif defined(__SIZEOF_INT128__)
 	// 3. GCC / Clang (64-bit platforms): Optimal code generation via 128-bit integer
 	unsigned __int128 sum = static_cast<unsigned __int128>(a) + b + carry;
@@ -185,31 +253,7 @@ inline uint8_t _nfg_add_with_carry(uint8_t carry, uint64_t a, uint64_t b, uint64
 #endif
 }
 
-// Return the high 64 bits of the 64x64 bit product a*b
-#ifdef _MSC_VER
-#include <intrin.h>
-inline uint64_t _nfg_mul_high(uint64_t a, uint64_t b) { return __umulh(a, b); }
-#elif defined (__SIZEOF_INT128__)
-inline uint64_t bn_mul_high(uint64_t a, uint64_t b) { return (uint64_t)(((unsigned __int128)a * b) >> 64); }
-#else
-inline uint64_t bn_mul_high(uint64_t a, uint64_t b) {
-	uint64_t a_lo = (uint32_t)a;
-	uint64_t a_hi = a >> 32;
-	uint64_t b_lo = (uint32_t)b;
-	uint64_t b_hi = b >> 32;
-
-	uint64_t p0 = a_lo * b_lo;
-	uint64_t p1 = a_hi * b_lo;
-	uint64_t p2 = a_lo * b_hi;
-	uint64_t p3 = a_hi * b_hi;
-
-	uint64_t cy = (p0 >> 32) + (uint32_t)p1 + (uint32_t)p2;
-
-	return p3 + (p1 >> 32) + (p2 >> 32) + (cy >> 32);
-}
-#endif
-
-// Return the low 64 bits of the 64x64 bit product a*b and set carry to the high 64bit
+// Return the low 64 bits of the 64x64 bit expression a*b+carry and set carry to the high 64bit
 inline uint64_t _nfg_mul_with_carry(uint64_t a, uint64_t b, uint64_t& carry) {
 	uint64_t prod_hi;
 #if defined(_MSC_VER) && !defined(__clang__) && defined(USE_AVX2_INSTRUCTIONS)
@@ -221,19 +265,19 @@ inline uint64_t _nfg_mul_with_carry(uint64_t a, uint64_t b, uint64_t& carry) {
 	uint64_t prod_lo = (uint64_t)prod;
 	prod_hi = (uint64_t)(prod >> 64);
 #else
-	// Fallback to 32-bit if there are no 128-bit extensions
-	uint64_t q_lo = (uint32_t)a, q_hi = a >> 32;
-	uint64_t b_lo = (uint32_t)b, b_hi = b >> 32;
+	uint64_t a_lo = static_cast<uint32_t>(a), a_hi = a >> 32;
+	uint64_t b_lo = static_cast<uint32_t>(b), b_hi = b >> 32;
+	uint64_t c_lo = static_cast<uint32_t>(carry), c_hi = carry >> 32;
 
-	uint64_t p0 = q_lo * b_lo;
-	uint64_t p1 = q_lo * b_hi;
-	uint64_t p2 = q_hi * b_lo;
-	uint64_t p3 = q_hi * b_hi;
+	uint64_t p0 = a_lo * b_lo;
+	uint64_t p1 = a_lo * b_hi;
+	uint64_t p2 = a_hi * b_lo;
+	uint64_t p3 = a_hi * b_hi;
 
-	uint64_t cy = (p0 >> 32) + (uint32_t)p1 + (uint32_t)p2;
-	uint64_t prod_lo = ((p1 + p2) << 32) + (uint32_t)p0 + carry;
-	if (prod_lo < carry) cy++;
-	prod_hi = p3 + (p1 >> 32) + (p2 >> 32) + (cy >> 32);
+	uint64_t s0 = static_cast<uint32_t>(p0) + c_lo;
+	uint64_t s1 = (p0 >> 32) + static_cast<uint32_t>(p1) + static_cast<uint32_t>(p2) + c_hi + (s0 >> 32);
+	uint64_t prod_lo = (s1 << 32) | static_cast<uint32_t>(s0);
+	prod_hi = p3 + (p1 >> 32) + (p2 >> 32) + (s1 >> 32); 
 #endif
 	carry = prod_hi;
 	return prod_lo;
@@ -1631,8 +1675,6 @@ inline interval_number interval_number::operator/(const interval_number& b) cons
 	if (!b.signIsReliable()) return NAN;
 
 	// <a0,a1> * <b0,b1>
-	__m128d ssg;
-	__m128d llhh, lhhl, ip;
 
 	// cfg	(min_low, high)		(low, high)
 	// 1	++ +-				-+ --
@@ -3438,50 +3480,10 @@ inline void bignatural::addmul(uint64_t b, uint32_t left_shifts, bignatural& res
 	uint64_t hi, lo, pm = 0;
 	while (dp != digits) {
 		dp--; rp--;
-
-#if defined(_MSC_VER) && defined(USE_AVX2_INSTRUCTIONS)
-		// MSVC on x64: Use native hardware intrinsics
-		lo = _umul128(*dp, b, &hi);
+		hi = 0;
+		lo = _nfg_mul_with_carry(*dp, b, hi);
 		hi += _nfg_add_with_carry(0, *rp, lo, rp);
 		hi += _nfg_add_with_carry(0, *rp, pm, rp);
-
-#elif defined(__SIZEOF_INT128__)
-		// GCC / Clang on 64-bit: Use native unsigned __int128 extension
-		unsigned __int128 prod = (unsigned __int128)(*dp) * b;
-		lo = (uint64_t)prod;
-		hi = (uint64_t)(prod >> 64);
-
-		// Accumulate *rp + lo + pm while tracking high-word carry
-		unsigned __int128 sum = (unsigned __int128)(*rp) + lo + pm;
-		*rp = (uint64_t)sum;
-		hi += (uint64_t)(sum >> 64);
-
-#else
-		// Portable fallback in standard C++ (32-bit splitting)
-		uint64_t u_lo = (uint32_t)(*dp), u_hi = (*dp) >> 32;
-		uint64_t v_lo = (uint32_t)b, v_hi = b >> 32;
-
-		uint64_t p0 = u_lo * v_lo;
-		uint64_t p1 = u_lo * v_hi;
-		uint64_t p2 = u_hi * v_lo;
-		uint64_t p3 = u_hi * v_hi;
-
-		uint64_t cy = (p0 >> 32) + (uint32_t)p1 + (uint32_t)p2;
-		lo = ((p1 + p2) << 32) + (uint32_t)p0;
-		hi = p3 + (p1 >> 32) + (p2 >> 32) + (cy >> 32);
-
-		// Accumulate *rp, lo, and pm into the target limb with carry handling
-		uint64_t cur_r = *rp;
-		uint64_t sum1 = cur_r + lo;
-		uint64_t c1 = (sum1 < cur_r) ? 1 : 0;
-
-		uint64_t sum2 = sum1 + pm;
-		uint64_t c2 = (sum2 < sum1) ? 1 : 0;
-
-		*rp = sum2;
-		hi += c1 + c2;
-#endif
-
 		pm = hi;
 	}
 
@@ -3552,14 +3554,12 @@ inline bignatural& bignatural::operator*=(const uint64_t b) {
 		uint64_t carry = 0;
 		while (da != digits) {
 			--da;
-			uint64_t lo = (*da) * b;
-			uint64_t hi = _nfg_mul_high(*da, b);
-			uint64_t sum = lo + carry;
-			carry = hi + (sum < lo);
-			*da = sum;
+			uint64_t lo, hi=0;
+			lo = _nfg_mul_with_carry(*da, b, hi);
+			carry = hi + _nfg_add_with_carry(0, lo, carry, da);
 		}
 
-		if (carry) addOneMostSignificantDigit((uint32_t)carry);
+		if (carry) addOneMostSignificantDigit(carry);
 	}
 
 	return *this;
