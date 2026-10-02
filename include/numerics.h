@@ -85,7 +85,9 @@
 #	else
 #		ifdef USE_SIMD_INSTRUCTIONS
 #			ifdef USE_AVX2_INSTRUCTIONS
-#				include <intrin.h>
+#				ifdef _MSC_VER
+#					include <intrin.h>
+#				endif
 #				include <immintrin.h>
 #			else
 #				include <emmintrin.h>
