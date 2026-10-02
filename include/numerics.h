@@ -3597,7 +3597,7 @@ namespace NFG {
 	inline bool bigfloat::operator!=(const bigfloat& b) const { return (operator-(b).sign != 0); }
 
 	inline bool bigfloat::operator<(const bigfloat& b) const {
-		assert(0 && "This function must be tested!");
+		//assert(0 && "This function must be tested!");
 
 		if (sign < b.sign) return true;
 		if (sign > b.sign) return false;
@@ -3992,8 +3992,11 @@ namespace NFG {
 				if (left_num >= right_num) sum = bigrational(left_num - right_num, denominator * r.denominator, -1);
 				else sum = bigrational(right_num - left_num, denominator * r.denominator, 1);
 			}
-
-			if (!denominator.coprime(r.denominator)) sum.canonicalize();
+			if (sum.numerator.empty()) {
+				sum.denominator = 0ULL;
+				sum.sign = 0;
+			}
+			else if (!denominator.coprime(r.denominator)) sum.canonicalize();
 
 			return sum;
 		}
