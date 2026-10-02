@@ -111,3958 +111,3970 @@
 #   endif
 #endif
 
-inline void setFPUModeToRoundUP() { fesetround(FE_UPWARD); }
-inline void setFPUModeToRoundNEAR() { fesetround(FE_TONEAREST); }
-
-// Deprecated. This function exists for back-compatibility only.
-inline void initFPU() { }
-
-inline void ip_error(const char* msg)
-{
-	std::cerr << msg;
-	exit(0);
-}
-
-
-////////////////////////////////////////////////////////////////////////////////////////////
-// 	   
-// C O M P I L E R   A N D   A R C H I T E C T U R E - D E P E N D E N T   F U N C T I O N S
-// 
-////////////////////////////////////////////////////////////////////////////////////////////
-
 #ifdef STDCPLUSPLUS20
 #include <bit>
-inline int nfg_count_lz(uint32_t v) { return std::countl_zero(v); }
-inline int nfg_count_rz(uint32_t v) { return std::countr_zero(v); }
-inline int nfg_count_lz(uint64_t v) { return std::countl_zero(v); }
-inline int nfg_count_rz(uint64_t v) { return std::countr_zero(v); }
-#else
-
-#if (defined(__GNUC__) || defined(__clang__)) && defined(__has_builtin) // GCC and Clang (x86-64, AMD64, ARM64)
-inline int nfg_count_lz(uint32_t v) { return (v == 0) ? (32) : (__builtin_clz(v)); }
-inline int nfg_count_rz(uint32_t v) { return (v == 0) ? (32) : (__builtin_ctz(v)); }
-inline int nfg_count_lz(uint64_t v) { return (v == 0) ? (64) : (__builtin_clzll(v)); }
-inline int nfg_count_rz(uint64_t v) { return (v == 0) ? (64) : (__builtin_ctzll(v)); }
-#elif defined(_MSC_VER) // MSVC (cl.exe and clang-cl on x86-64, AMD64, ARM64)
-inline int nfg_count_lz(uint32_t v) {
-	if (v == 0) return 32;
-	unsigned long index;
-	_BitScanReverse(&index, v);
-	return 31 - static_cast<int>(index);
-}
-
-inline int nfg_count_rz(uint32_t v) {
-	if (v == 0) return 32;
-	unsigned long index;
-	_BitScanForward(&index, v);
-	return static_cast<int>(index);
-}
-
-inline int nfg_count_lz(uint64_t v) {
-	if (v == 0) return 64;
-	unsigned long index;
-	_BitScanReverse64(&index, v);
-	return 63 - static_cast<int>(index);
-}
-
-inline int nfg_count_rz(uint64_t v) {
-	if (v == 0) return 64;
-	unsigned long index;
-	_BitScanForward64(&index, v);
-	return static_cast<int>(index);
-}
-#else // Portable
-inline int nfg_count_lz(uint32_t v) {
-	if (v == 0) return 32;
-	int count = 0;
-	if ((v & 0xFFFF0000U) == 0) { count += 16; v <<= 16; }
-	if ((v & 0xFF000000U) == 0) { count += 8;  v <<= 8; }
-	if ((v & 0xF0000000U) == 0) { count += 4;  v <<= 4; }
-	if ((v & 0xC0000000U) == 0) { count += 2;  v <<= 2; }
-	if ((v & 0x80000000U) == 0) { count += 1; }
-	return count;
-}
-
-inline int nfg_count_rz(uint32_t v) {
-	if (v == 0) return 32;
-	int count = 0;
-	if ((v & 0x0000FFFFU) == 0) { count += 16; v >>= 16; }
-	if ((v & 0x000000FFU) == 0) { count += 8;  v >>= 8; }
-	if ((v & 0x0000000FU) == 0) { count += 4;  v >>= 4; }
-	if ((v & 0x00000003U) == 0) { count += 2;  v >>= 2; }
-	if ((v & 0x00000001U) == 0) { count += 1; }
-	return count;
-}
-
-
-inline int nfg_count_lz(uint64_t v) {
-	if (v == 0) return 64;
-	int count = 0;
-	if ((v & 0xFFFFFFFF00000000ULL) == 0) { count += 32; v <<= 32; }
-	if ((v & 0xFFFF000000000000ULL) == 0) { count += 16; v <<= 16; }
-	if ((v & 0xFF00000000000000ULL) == 0) { count += 8;  v <<= 8; }
-	if ((v & 0xF000000000000000ULL) == 0) { count += 4;  v <<= 4; }
-	if ((v & 0xC000000000000000ULL) == 0) { count += 2;  v <<= 2; }
-	if ((v & 0x8000000000000000ULL) == 0) { count += 1; }
-	return count;
-}
-
-inline int nfg_count_rz(uint64_t v) {
-	if (v == 0)	return 64;
-	int count = 0;
-	if ((v & 0x00000000FFFFFFFFULL) == 0) { count += 32; v >>= 32; }
-	if ((v & 0x000000000000FFFFULL) == 0) { count += 16; v >>= 16; }
-	if ((v & 0x00000000000000FFULL) == 0) { count += 8;  v >>= 8; }
-	if ((v & 0x000000000000000FULL) == 0) { count += 4;  v >>= 4; }
-	if ((v & 0x0000000000000003ULL) == 0) { count += 2;  v >>= 2; }
-	if ((v & 0x0000000000000001ULL) == 0) { count += 1; }
-	return count;
-}
-
 #endif
-#endif // STDCPLUSPLUS20
 
-// Set out = a + b + carry and return 1 if overflow occurs (i.e. if sum exceeds 64 bits)
-inline uint8_t _nfg_add_with_carry(uint8_t carry, uint64_t a, uint64_t b, uint64_t* out) {
-#if defined(_MSC_VER) && defined(USE_AVX2_INSTRUCTIONS)
-	// 1. MSVC (x64 / ARM64): Uses hardware intrinsic directly
-	return _addcarry_u64(carry, a, b, reinterpret_cast<unsigned __int64*>(out));
+namespace NFG {
 
-#elif defined(__clang__) && defined(__has_builtin) 
- #if __has_builtin(__builtin_addcll)
-	// 2. Clang (x86/x64, ARM64, RISC-V): Clang's architecture-agnostic builtin
-	unsigned long long carry_out = 0;
-	*out = __builtin_addcll(a, b, carry, &carry_out);
-	return static_cast<uint8_t>(carry_out);
-#endif
-#elif defined(__SIZEOF_INT128__)
-	// 3. GCC / Clang (64-bit platforms): Optimal code generation via 128-bit integer
-	unsigned __int128 sum = static_cast<unsigned __int128>(a) + b + carry;
-	*out = static_cast<uint64_t>(sum);
-	return static_cast<uint8_t>(sum >> 64);
-#else
-	// 5. Pure C++ Standard Fallback (ARM32, WebAssembly, 32-bit platforms)
-	uint64_t sum1 = a + b;
-	uint8_t c1 = (sum1 < a) ? 1 : 0;
+	inline void setFPUModeToRoundUP() { fesetround(FE_UPWARD); } // Set FPU rounding mode to +INFINITY
+	inline void setFPUModeToRoundNEAR() { fesetround(FE_TONEAREST); } // Set FPU rounding mode to nearest
 
-	uint64_t sum2 = sum1 + carry;
-	uint8_t c2 = (sum2 < sum1) ? 1 : 0;
+	// Deprecated. This function exists for back-compatibility only.
+	inline void initFPU() {}
 
-	*out = sum2;
-	return c1 | c2;
-#endif
-}
+	inline void ip_error(const char* msg)
+	{
+		std::cerr << msg;
+		exit(0);
+	}
 
-// Return the low 64 bits of the 64x64 bit expression a*b+carry and set carry to the high 64bit
-inline uint64_t _nfg_mul_with_carry(uint64_t a, uint64_t b, uint64_t& carry) {
-	uint64_t prod_hi;
-#if defined(_MSC_VER) && !defined(__clang__) && defined(USE_AVX2_INSTRUCTIONS)
-	uint64_t prod_lo = _umul128(a, b, &prod_hi);
-	prod_lo += carry;
-	if (prod_lo < carry) prod_hi++;
-#elif defined(__SIZEOF_INT128__)
-	unsigned __int128 prod = (unsigned __int128)a * b + carry;
-	uint64_t prod_lo = (uint64_t)prod;
-	prod_hi = (uint64_t)(prod >> 64);
-#else
-	uint64_t a_lo = static_cast<uint32_t>(a), a_hi = a >> 32;
-	uint64_t b_lo = static_cast<uint32_t>(b), b_hi = b >> 32;
-	uint64_t c_lo = static_cast<uint32_t>(carry), c_hi = carry >> 32;
+	int nfg_count_lz(uint32_t v);
+	int nfg_count_rz(uint32_t v);
+	int nfg_count_lz(uint64_t v);
+	int nfg_count_rz(uint64_t v);
 
-	uint64_t p0 = a_lo * b_lo;
-	uint64_t p1 = a_lo * b_hi;
-	uint64_t p2 = a_hi * b_lo;
-	uint64_t p3 = a_hi * b_hi;
+	/////////////////////////////////////////////////////////////////////
+	// 	   
+	// 	   M E M O R Y   P O O L S
+	// 
+	/////////////////////////////////////////////////////////////////////
 
-	uint64_t s0 = static_cast<uint32_t>(p0) + c_lo;
-	uint64_t s1 = (p0 >> 32) + static_cast<uint32_t>(p1) + static_cast<uint32_t>(p2) + c_hi + (s0 >> 32);
-	uint64_t prod_lo = (s1 << 32) | static_cast<uint32_t>(s0);
-	prod_hi = p3 + (p1 >> 32) + (p2 >> 32) + (s1 >> 32); 
-#endif
-	carry = prod_hi;
-	return prod_lo;
-}
+	// An N_block is a contiguous portion of memory elements.
+	// An N_memory_pool stores a set of N_blocks along with
+	// a 'stack' of pointers to these blocks.
+	// Upon allocation, the first free block is picked from the stack.
+	// If the stack is empty, the size of the pool (and the stack) is grown.
+	// When a block is released, its pointer is added on top of the stack.
+	//
+	// alloc is almost always O(1) [O(num_blocks) only if growth is required]
+	// release is always O(1)
 
-// Return (dig+(rem<<64))/D and set rem = (dig+(rem<<64))%D 
-inline uint64_t _nfg_div_with_rem(uint64_t& rem, uint64_t dig, uint64_t D) {
-#if defined(_MSC_VER) && !defined(__clang__) && defined(USE_AVX2_INSTRUCTIONS)
-	return _udiv128(rem, dig, D, &rem);
-#elif defined(__SIZEOF_INT128__) && defined(_MSC_VER) // CLang on MSVC has neither _udiv128 nor 128bit division. Use ASM.
-	uint64_t q;
-	__asm__("divq %4"
-		: "=a"(q), "=d"(rem)
-		: "a"(dig), "d"(rem), "r"(D)
-		: "cc");
-	return q;
-#elif defined(__SIZEOF_INT128__) && !defined(_MSC_VER)
-	unsigned __int128 cur = ((unsigned __int128)rem << 64) | dig;
-	rem = (uint64_t)(cur % D);
-	return (uint64_t)(cur / D);
-#else
-	// First half of the limb (upper 32 bits)
-	uint64_t cur = (rem << 32) | (dig >> 32);
-	uint64_t q_hi = cur / D;
-	rem = cur % D;
+	class N_memory_pool {
+		std::vector<uint8_t*> data; // Data storage. Each data[i] is an array of N_blocks
+		uint8_t** stack;	// Stack of pointers to free blocks
+		size_t last;		// Element past to the last in the stack
+		size_t size;		// Size of the pool (total number of blocks)
+		const size_t block_size; // Size of one block (number N of elements)
 
-	// Second half of the limb (lower 32 bits)
-	cur = (rem << 32) | (uint32_t)dig;
-	uint64_t q_lo = cur / D;
-	rem = cur % D;
+	public:
+		N_memory_pool(size_t _size, size_t _block_size);
+		N_memory_pool(N_memory_pool&& p) noexcept;
+		~N_memory_pool();
 
-	return (q_hi << 32) | q_lo;
-#endif
-}
+		void* alloc();
+		void release(void* s);
 
-/////////////////////////////////////////////////////////////////////
-// 	   
-// 	   M E M O R Y   P O O L S
-// 
-/////////////////////////////////////////////////////////////////////
+	protected:
+		void addDataBlockArray(size_t tot_size, uint8_t** fs);
+		void doubleDataArray();
+	};
 
-// An N_block is a contiguous portion of memory elements.
-// An N_memory_pool stores a set of N_blocks along with
-// a 'stack' of pointers to these blocks.
-// Upon allocation, the first free block is picked from the stack.
-// If the stack is empty, the size of the pool (and the stack) is grown.
-// When a block is released, its pointer is added on top of the stack.
-//
-// alloc is almost always O(1) [O(num_blocks) only if growth is required]
-// release is always O(1)
+	// An N_block is a contiguous portion of 32-bit memory elements.
+	// An extended_N_block is the concatentaion of [N] and an N_block.
+	//
+	//		i.e. uint32_t block_N[N+1] = { N, v1, v2, ..., vN };
+	// 
+	// An Indexed N pool (IN_pool) stores a set of extended_N_blocks along with
+	// a 'stack' of pointers to these extended blocks. Each pointer in the stack
+	// points to the second element of an extended block because the first must 
+	// always store the block size and is therefore reserved.
+	// Upon allocation, the first free block is picked from the stack.
+	// If the stack is empty, the size of the pool (and the stack) is grown.
+	// When a block is released, its pointer is added on top of the stack.
+	//
+	// alloc is almost always O(1) [O(num_blocks) only if growth is required]
+	// release is always O(1)
 
-class N_memory_pool {
-	std::vector<uint8_t*> data; // Data storage. Each data[i] is an array of N_blocks
-	uint8_t** stack;	// Stack of pointers to free blocks
-	size_t last;		// Element past to the last in the stack
-	size_t size;		// Size of the pool (total number of blocks)
-	const size_t block_size; // Size of one block (number N of elements)
+	class IN_pool {
+		std::vector<uint32_t*> data; // Data storage. Each data[i] is an array of extended_N_blocks
+		uint32_t** stack;	// Stack of pointers to free blocks
+		uint32_t last;		// Element past to the last in the stack
+		uint32_t size;		// Size of the pool (total number of blocks)
+		const uint32_t block_size; // Size of one block (number N of elements)
 
-public:
-	N_memory_pool(size_t _size, size_t _block_size);
-	N_memory_pool(N_memory_pool&& p) noexcept;
-	~N_memory_pool();
+	public:
+		IN_pool(uint32_t _size, uint32_t _block_size);
+		IN_pool(IN_pool&& p) noexcept;
+		~IN_pool();
 
-	void* alloc();
-	void release(void* s);
+		uint32_t* alloc();
+		void release(uint32_t* s);
 
-protected:
-	void addDataBlockArray(size_t tot_size, uint8_t** fs);
-	void doubleDataArray();
-};
+		uint32_t blockSize() const;
 
-// An N_block is a contiguous portion of 32-bit memory elements.
-// An extended_N_block is the concatentaion of [N] and an N_block.
-//
-//		i.e. uint32_t block_N[N+1] = { N, v1, v2, ..., vN };
-// 
-// An Indexed N pool (IN_pool) stores a set of extended_N_blocks along with
-// a 'stack' of pointers to these extended blocks. Each pointer in the stack
-// points to the second element of an extended block because the first must 
-// always store the block size and is therefore reserved.
-// Upon allocation, the first free block is picked from the stack.
-// If the stack is empty, the size of the pool (and the stack) is grown.
-// When a block is released, its pointer is added on top of the stack.
-//
-// alloc is almost always O(1) [O(num_blocks) only if growth is required]
-// release is always O(1)
+	protected:
+		void addDataBlockArray(uint32_t tot_size, uint32_t extended_block_size, uint32_t** fs);
+		void doubleDataArray();
+	};
 
-class IN_pool {
-	std::vector<uint32_t*> data; // Data storage. Each data[i] is an array of extended_N_blocks
-	uint32_t** stack;	// Stack of pointers to free blocks
-	uint32_t last;		// Element past to the last in the stack
-	uint32_t size;		// Size of the pool (total number of blocks)
-	const uint32_t block_size; // Size of one block (number N of elements)
+	// A MultiPool is a collection of IN_pools having size N = 2, 4, 8, 16, ..., 2^m
+	// 
+	// Upon allocation for X elements two cases may occur:
+	// 1) X <= 2^m
+	//     Calculate the minimum value of N such that N >= X
+	//     Allocate a block in the corresponding IN_pool
+	// 2) X > 2^m 
+	//	   standard malloc() is used for X+1 elements
+	// 	   first element is set to 0 [meaning that no IN_pool was used]
+	// 	   a pointer to the second element is returned for use
+	//
+	// Upon release of a pointer A
+	//    Let V be the value of the element preceeding the one pointed by A (i.e. V = A[-1])
+	//    If V==0 use standard free()
+	//    else if V==N release a block is the corresponding IN_pool
 
-public:
-	IN_pool(uint32_t _size, uint32_t _block_size);
-	IN_pool(IN_pool&& p) noexcept;
-	~IN_pool();
+	class MultiPool {
+		std::vector<IN_pool> IN_pools;
+		uint32_t max_block_size;
 
-	uint32_t* alloc();
-	void release(uint32_t* s);
+	public:
+		MultiPool(uint32_t _max_block_size = 32, uint32_t init_capacity = 16);
 
-	uint32_t blockSize() const;
+		void* alloc(uint32_t num_bytes);
+		void release(void* s);
 
-protected:
-	void addDataBlockArray(uint32_t tot_size, uint32_t extended_block_size, uint32_t** fs);
-	void doubleDataArray();
-};
-
-// A MultiPool is a collection of IN_pools having size N = 2, 4, 8, 16, ..., 2^m
-// 
-// Upon allocation for X elements two cases may occur:
-// 1) X <= 2^m
-//     Calculate the minimum value of N such that N >= X
-//     Allocate a block in the corresponding IN_pool
-// 2) X > 2^m 
-//	   standard malloc() is used for X+1 elements
-// 	   first element is set to 0 [meaning that no IN_pool was used]
-// 	   a pointer to the second element is returned for use
-//
-// Upon release of a pointer A
-//    Let V be the value of the element preceeding the one pointed by A (i.e. V = A[-1])
-//    If V==0 use standard free()
-//    else if V==N release a block is the corresponding IN_pool
-
-class MultiPool {
-	std::vector<IN_pool> IN_pools;
-	uint32_t max_block_size;
-
-public:
-	MultiPool(uint32_t _max_block_size = 32, uint32_t init_capacity = 16);
-
-	void* alloc(uint32_t num_bytes);
-	void release(void* s);
-
-protected:
-	IN_pool& pickPoolFromSize(uint32_t bs);
-};
+	protected:
+		IN_pool& pickPoolFromSize(uint32_t bs);
+	};
 
 
-/////////////////////////////////////////////////////////////////////
-// 	   
-// 	   I N T E R V A L   A R I T H M E T I C
-// 
-/////////////////////////////////////////////////////////////////////
+	/////////////////////////////////////////////////////////////////////
+	// 	   
+	// 	   I N T E R V A L   A R I T H M E T I C
+	// 
+	/////////////////////////////////////////////////////////////////////
 
-// An interval_number is a pair of doubles representing an interval.
-// Operations on interval_number require that the rounding mode is
-// set to +INFINITY. Use setFPUModeToRoundUP().
-//
-// All the four arithmetic operations and the square root are correctly
-// rounded.
+	// An interval_number is a pair of doubles representing an interval.
+	// Operations on interval_number require that the rounding mode is
+	// set to +INFINITY. Use setFPUModeToRoundUP().
+	//
+	// All the four arithmetic operations and the square root are correctly
+	// rounded.
 
-class interval_number
-{
+	class interval_number
+	{
 #ifdef USE_SIMD_INSTRUCTIONS
-	__m128d interval; // interval[1] = min_low, interval[0] = high
+		__m128d interval; // interval[1] = min_low, interval[0] = high
 #else // USE_SIMD_INSTRUCTIONS
-	double min_low, high;
+		double min_low, high;
 #endif // USE_SIMD_INSTRUCTIONS
 
-public:
-	// Undefined interval (can be invalid)
-	interval_number();
+	public:
+		// Undefined interval (can be invalid)
+		interval_number();
 
-	// Singleton [a, a]
-	interval_number(const double a);
+		// Singleton [a, a]
+		interval_number(const double a);
 
-	// Interval [-minf, sup]
-	interval_number(const double minf, const double sup);
+		// Interval [-minf, sup]
+		interval_number(const double minf, const double sup);
 
-	// Copy constructor
-	interval_number(const interval_number& b);
+		// Copy constructor
+		interval_number(const interval_number& b);
 
-	// Access the two bounds
-	const double* getInterval() const;
+		// Access the two bounds
+		const double* getInterval() const;
 
-	// Negated infimum
-	double minus_inf() const;
+		// Negated infimum
+		double minus_inf() const;
 
-	// Infimum
-	double inf() const;
+		// Infimum
+		double inf() const;
 
-	// Supremum
-	double sup() const;
+		// Supremum
+		double sup() const;
 
-	// TRUE if the entire interval is negative
-	bool isNegative() const;
+		// TRUE if the entire interval is negative
+		bool isNegative() const;
 
-	// TRUE if the entire interval is positive
-	bool isPositive() const;
+		// TRUE if the entire interval is positive
+		bool isPositive() const;
 
-	// Invert the interval sign (additive inversion)
-	void negate();
+		// Invert the interval sign (additive inversion)
+		void negate();
 
-	// Copy assignment
-	interval_number& operator=(const interval_number& b);
+		// Copy assignment
+		interval_number& operator=(const interval_number& b);
 
-	// TRUE if interval is entirely positive or entirely negative
-	bool signIsReliable() const;
+		// TRUE if interval is entirely positive or entirely negative
+		bool signIsReliable() const;
 
-	// TRUE if interval contains zero
-	bool containsZero() const;
+		// TRUE if interval contains zero
+		bool containsZero() const;
 
-	// This is -1 if interval is entirely negative, +1 otherwise
-	// Should be used only when signIsReliable() is TRUE
-	int sign() const;
+		// This is -1 if interval is entirely negative, +1 otherwise
+		// Should be used only when signIsReliable() is TRUE
+		int sign() const;
 
-	// Return the additive inverse
-	interval_number operator-() const;
+		// Return the additive inverse
+		interval_number operator-() const;
 
-	// Arithmetic operations
-	// Division by an interval that contains zero produces a NAN interval
-	interval_number operator+(const interval_number& b) const;
-	interval_number operator-(const interval_number& b) const;
-	interval_number operator*(const interval_number& b) const;
-	interval_number operator/(const interval_number& b) const;
-	interval_number operator+(const double b) const;
-	interval_number operator-(const double b) const;
-	interval_number operator*(const double b) const;
-	interval_number operator/(const double b) const;
-	interval_number& operator+=(const interval_number& b);
-	interval_number& operator-=(const interval_number& b);
-	interval_number& operator*=(const interval_number& b);
-	interval_number& operator/=(const interval_number& b);
-	interval_number& operator+=(const double b);
-	interval_number& operator-=(const double b);
-	interval_number& operator*=(const double b);
-	interval_number& operator/=(const double b);
+		// Arithmetic operations
+		// Division by an interval that contains zero produces a NAN interval
+		interval_number operator+(const interval_number& b) const;
+		interval_number operator-(const interval_number& b) const;
+		interval_number operator*(const interval_number& b) const;
+		interval_number operator/(const interval_number& b) const;
+		interval_number operator+(const double b) const;
+		interval_number operator-(const double b) const;
+		interval_number operator*(const double b) const;
+		interval_number operator/(const double b) const;
+		interval_number& operator+=(const interval_number& b);
+		interval_number& operator-=(const interval_number& b);
+		interval_number& operator*=(const interval_number& b);
+		interval_number& operator/=(const interval_number& b);
+		interval_number& operator+=(const double b);
+		interval_number& operator-=(const double b);
+		interval_number& operator*=(const double b);
+		interval_number& operator/=(const double b);
 
 #ifdef USE_AVX2_INSTRUCTIONS
-	interval_number fmadd(const interval_number& b, const interval_number& c) const;
-	interval_number fmsub(const interval_number& b, const interval_number& c) const;
+		interval_number fmadd(const interval_number& b, const interval_number& c) const;
+		interval_number fmsub(const interval_number& b, const interval_number& c) const;
 #endif
 
-	// Absolute value
-	interval_number abs() const;
+		// Absolute value
+		interval_number abs() const;
 
-	// Suqared interval
-	interval_number sqr() const;
+		// Suqared interval
+		interval_number sqr() const;
 
-	// Integer-exponent power
-	interval_number pow(unsigned int e) const;
+		// Integer-exponent power
+		interval_number pow(unsigned int e) const;
 
-	// Square
-	interval_number pow2() const;
+		// Square
+		interval_number pow2() const;
 
-	// Cube
-	interval_number pow3() const;
+		// Cube
+		interval_number pow3() const;
 
-	// Minimum
-	friend interval_number min(const interval_number& a, const interval_number& b);
+		// Minimum
+		friend interval_number min(const interval_number& a, const interval_number& b);
 
-	// Maximum
-	friend interval_number max(const interval_number& a, const interval_number& b);
+		// Maximum
+		friend interval_number max(const interval_number& a, const interval_number& b);
 
-	// Interval width
-	double width() const;
+		// Interval width
+		double width() const;
 
-	// TRUE if NAN
-	bool isNAN() const;
+		// TRUE if NAN
+		bool isNAN() const;
 
-	// Interval midpoint
-	double getMid() const;
+		// Interval midpoint
+		double getMid() const;
 
-	// TRUE if interval is a singleton
-	bool isExact() const;
+		// TRUE if interval is a singleton
+		bool isExact() const;
 
-	// Can be TRUE only if the intervals are disjoint
-	bool operator<(const interval_number& b) const;
-	bool operator>(const interval_number& b) const;
+		// Can be TRUE only if the intervals are disjoint
+		bool operator<(const interval_number& b) const;
+		bool operator>(const interval_number& b) const;
 
-	// Can be TRUE only if the interval interiors are disjoint
-	bool operator<=(const interval_number& b) const;
-	bool operator>=(const interval_number& b) const;
+		// Can be TRUE only if the interval interiors are disjoint
+		bool operator<=(const interval_number& b) const;
+		bool operator>=(const interval_number& b) const;
 
-	// TRUE if the intervals are identical single values
-	bool operator==(const interval_number& b) const;
+		// TRUE if the intervals are identical single values
+		bool operator==(const interval_number& b) const;
 
-	// TRUE if the intervals have no common values
-	bool operator!=(const interval_number& b) const;
+		// TRUE if the intervals have no common values
+		bool operator!=(const interval_number& b) const;
 
-	bool operator<(const double b) const;
-	bool operator<=(const double b) const;
-	bool operator>(const double b) const;
-	bool operator>=(const double b) const;
-	bool operator==(const double b) const;
+		bool operator<(const double b) const;
+		bool operator<=(const double b) const;
+		bool operator>(const double b) const;
+		bool operator>=(const double b) const;
+		bool operator==(const double b) const;
 
-	// The inverse of an interval. Returns NAN if the interval contains zero
-	interval_number inverse() const;
+		// The inverse of an interval. Returns NAN if the interval contains zero
+		interval_number inverse() const;
 
-	// A scalar divided by an interval. Returns NAN if the interval contains zero
-	interval_number invmul(const double b) const;
+		// A scalar divided by an interval. Returns NAN if the interval contains zero
+		interval_number invmul(const double b) const;
 
 #ifdef USE_SIMD_INSTRUCTIONS
-	interval_number(const __m128d& i);
+		interval_number(const __m128d& i);
 
-protected:
-	static __m128d zero();
-	static __m128d minus_one();
-	static __m128d sign_low_mask();
-	static __m128d sign_high_mask();
-	static __m128d sign_fabs_mask();
-	static __m128d all_high_mask();
+	protected:
+		static __m128d zero();
+		static __m128d minus_one();
+		static __m128d sign_low_mask();
+		static __m128d sign_high_mask();
+		static __m128d sign_fabs_mask();
+		static __m128d all_high_mask();
 
-	__m128d getLowSwitched() const;
+		__m128d getLowSwitched() const;
 #endif // USE_SIMD_INSTRUCTIONS
-};
+	};
 
-// The square root of an interval
-// Returns NAN if the interval contains a negative value
-interval_number sqrt(const interval_number& p);
+	// The square root of an interval
+	// Returns NAN if the interval contains a negative value
+	interval_number sqrt(const interval_number& p);
 
-// stream output
-inline std::ostream& operator<<(std::ostream& os, const interval_number& p)
-{
-	os << "[ " << p.inf() << ", " << p.sup() << " ]";
-	return os;
-}
+	// stream output
+	inline std::ostream& operator<<(std::ostream& os, const interval_number& p)
+	{
+		os << "[ " << p.inf() << ", " << p.sup() << " ]";
+		return os;
+	}
 
-inline interval_number operator+(const double a, const interval_number& p) { return p + a; }
-inline interval_number operator-(const double a, const interval_number& p) { return -(p - a); }
-inline interval_number operator*(const double b, const interval_number& d) { return d * b; }
+	inline interval_number operator+(const double a, const interval_number& p) { return p + a; }
+	inline interval_number operator-(const double a, const interval_number& p) { return -(p - a); }
+	inline interval_number operator*(const double b, const interval_number& d) { return d * b; }
 
-/////////////////////////////////////////////////////////////////////
-// 	   
-// 	   E X P A N S I O N   A R I T H M E T I C
-// 
-/////////////////////////////////////////////////////////////////////
+	/////////////////////////////////////////////////////////////////////
+	// 	   
+	// 	   E X P A N S I O N   A R I T H M E T I C
+	// 
+	/////////////////////////////////////////////////////////////////////
 
-// Struct-like container to access functions for expansion arithmetic
-struct expansionObject
-{
-public:
-	inline static thread_local MultiPool mempool = MultiPool(2048, 64);
+	// Struct-like container to access functions for expansion arithmetic
+	struct expansionObject
+	{
+	public:
+		inline static thread_local MultiPool mempool = MultiPool(2048, 64);
 
-	// Basic error-free transformations
-	static void Quick_Two_Sum(const double a, const double b, double& x, double& y);
-	static void quick_Two_Sum(const double a, const double b, double* xy);
-	static void Two_Sum(const double a, const double b, double& x, double& y);
-	static void two_Sum(const double a, const double b, double* xy);
-	static void Two_One_Sum(const double a1, const double a0, const double b, double& x2, double& x1, double& x0);
-	static void two_One_Sum(const double *a, const double b, double* x);
-	static void Two_Diff(const double a, const double b, double& x, double& y);
-	static void two_Diff(const double a, const double b, double* xy);
-	static void Two_One_Diff(const double a1, const double a0, const double b, double& x2, double& x1, double& x0);
+		// Basic error-free transformations
+		static void Quick_Two_Sum(const double a, const double b, double& x, double& y);
+		static void quick_Two_Sum(const double a, const double b, double* xy);
+		static void Two_Sum(const double a, const double b, double& x, double& y);
+		static void two_Sum(const double a, const double b, double* xy);
+		static void Two_One_Sum(const double a1, const double a0, const double b, double& x2, double& x1, double& x0);
+		static void two_One_Sum(const double* a, const double b, double* x);
+		static void Two_Diff(const double a, const double b, double& x, double& y);
+		static void two_Diff(const double a, const double b, double* xy);
+		static void Two_One_Diff(const double a1, const double a0, const double b, double& x2, double& x1, double& x0);
 
-	// Products
+		// Products
 
-	// [x,y] = [a]*[b]		 Multiplies two expansions [a] and [b] of length one
-	static void Two_Prod(const double a, const double b, double& x, double& y);
-	static void Two_Prod(const double a, const double b, double* xy);
+		// [x,y] = [a]*[b]		 Multiplies two expansions [a] and [b] of length one
+		static void Two_Prod(const double a, const double b, double& x, double& y);
+		static void Two_Prod(const double a, const double b, double* xy);
 
-	// [x,y] = [a]^2		Squares an expansion of length one
-	static void Square(const double a, double& x, double& y);
-	static void Square(const double a, double* xy);
+		// [x,y] = [a]^2		Squares an expansion of length one
+		static void Square(const double a, double& x, double& y);
+		static void Square(const double a, double* xy);
 
-	// [x2,x1,x0] = [a1,a0]-[b]		Subtracts an expansion [b] of length one from an expansion [a1,a0] of length two
-	static void two_One_Diff(const double a1, const double a0, const double b, double& x2, double& x1, double& x0);
-	static void two_One_Diff(const double* a, const double b, double* x);
+		// [x2,x1,x0] = [a1,a0]-[b]		Subtracts an expansion [b] of length one from an expansion [a1,a0] of length two
+		static void two_One_Diff(const double a1, const double a0, const double b, double& x2, double& x1, double& x0);
+		static void two_One_Diff(const double* a, const double b, double* x);
 
-	// [x3,x2,x1,x0] = [a1,a0]*[b]		Multiplies an expansion [a1,a0] of length two by an expansion [b] of length one
-	static void Two_One_Prod(const double a1, const double a0, const double b, double& x3, double& x2, double& x1, double& x0);
-	static void Two_One_Prod(const double* a, const double b, double* x);
+		// [x3,x2,x1,x0] = [a1,a0]*[b]		Multiplies an expansion [a1,a0] of length two by an expansion [b] of length one
+		static void Two_One_Prod(const double a1, const double a0, const double b, double& x3, double& x2, double& x1, double& x0);
+		static void Two_One_Prod(const double* a, const double b, double* x);
 
-	// [x3,x2,x1,x0] = [a1,a0]+[b1,b0]		Calculates the sum of two expansions of length two
-	static void Two_Two_Sum(const double a1, const double a0, const double b1, const double b0, double& x3, double& x2, double& x1, double& x0);
-	static void Two_Two_Sum(const double* a, const double* b, double* xy);
+		// [x3,x2,x1,x0] = [a1,a0]+[b1,b0]		Calculates the sum of two expansions of length two
+		static void Two_Two_Sum(const double a1, const double a0, const double b1, const double b0, double& x3, double& x2, double& x1, double& x0);
+		static void Two_Two_Sum(const double* a, const double* b, double* xy);
 
-	// [x3,x2,x1,x0] = [a1,a0]-[b1,b0]		Calculates the difference between two expansions of length two
-	static void Two_Two_Diff(const double a1, const double a0, const double b1, const double b0, double& x3, double& x2, double& x1, double& x0);
-	static void Two_Two_Diff(const double* a, const double* b, double* x);
+		// [x3,x2,x1,x0] = [a1,a0]-[b1,b0]		Calculates the difference between two expansions of length two
+		static void Two_Two_Diff(const double a1, const double a0, const double b1, const double b0, double& x3, double& x2, double& x1, double& x0);
+		static void Two_Two_Diff(const double* a, const double* b, double* x);
 
-	// Calculates the second component 'y' of the expansion [x,y] = [a]-[b] when 'x' is known
-	static void Two_Diff_Back(const double a, const double b, double& x, double& y);
-	static void Two_Diff_Back(const double a, const double b, double* xy);
+		// Calculates the second component 'y' of the expansion [x,y] = [a]-[b] when 'x' is known
+		static void Two_Diff_Back(const double a, const double b, double& x, double& y);
+		static void Two_Diff_Back(const double a, const double b, double* xy);
 
-	// [h] = [a1,a0]^2		Squares an expansion of length 2
-	// 'h' must be allocated by the caller with 6 components.
-	static void Two_Square(const double& a1, const double& a0, double* x);
-	static void Two_Square(const double* a, double* x);
+		// [h] = [a1,a0]^2		Squares an expansion of length 2
+		// 'h' must be allocated by the caller with 6 components.
+		static void Two_Square(const double& a1, const double& a0, double* x);
+		static void Two_Square(const double* a, double* x);
 
-	// [h7,h6,...,h0] = [a1,a0]*[b1,b0]		Calculates the product of two expansions of length two.
-	// 'h' must be allocated by the caller with eight components.
-	static void Two_Two_Prod(const double a1, const double a0, const double b1, const double b0, double* h);
-	static void Two_Two_Prod(const double* a, const double* b, double* xy);
+		// [h7,h6,...,h0] = [a1,a0]*[b1,b0]		Calculates the product of two expansions of length two.
+		// 'h' must be allocated by the caller with eight components.
+		static void Two_Two_Prod(const double a1, const double a0, const double b1, const double b0, double* h);
+		static void Two_Two_Prod(const double* a, const double* b, double* xy);
 
-	// [e] = -[e]		Inplace inversion
-	static void Gen_Invert(const int elen, double* e);
+		// [e] = -[e]		Inplace inversion
+		static void Gen_Invert(const int elen, double* e);
 
-	// [h] = [e] + [f]		Sums two expansions and returns number of components of result
-	// 'h' must be allocated by the caller with at least elen+flen components.
-	static int Gen_Sum(const int elen, const double* e, const int flen, const double* f, double* h);
+		// [h] = [e] + [f]		Sums two expansions and returns number of components of result
+		// 'h' must be allocated by the caller with at least elen+flen components.
+		static int Gen_Sum(const int elen, const double* e, const int flen, const double* f, double* h);
 
-	// Same as above, but 'h' is allocated internally. The caller must still call 'free' to release the memory.
-	static int Gen_Sum_With_Alloc(const int elen, const double* e, const int flen, const double* f, double** h);
+		// Same as above, but 'h' is allocated internally. The caller must still call 'free' to release the memory.
+		static int Gen_Sum_With_Alloc(const int elen, const double* e, const int flen, const double* f, double** h);
 
-	// [h] = [e] + [f]		Subtracts two expansions and returns number of components of result
-	// 'h' must be allocated by the caller with at least elen+flen components.
-	static int Gen_Diff(const int elen, const double* e, const int flen, const double* f, double* h);
+		// [h] = [e] + [f]		Subtracts two expansions and returns number of components of result
+		// 'h' must be allocated by the caller with at least elen+flen components.
+		static int Gen_Diff(const int elen, const double* e, const int flen, const double* f, double* h);
 
-	// Same as above, but 'h' is allocated internally. The caller must still call 'free' to release the memory.
-	static int Gen_Diff_With_Alloc(const int elen, const double* e, const int flen, const double* f, double** h);
+		// Same as above, but 'h' is allocated internally. The caller must still call 'free' to release the memory.
+		static int Gen_Diff_With_Alloc(const int elen, const double* e, const int flen, const double* f, double** h);
 
-	// [h] = [e] * b		Multiplies an expansion by a scalar
-	// 'h' must be allocated by the caller with at least elen*2 components.
-	static int Gen_Scale(const int elen, const double* e, const double b, double* h);
+		// [h] = [e] * b		Multiplies an expansion by a scalar
+		// 'h' must be allocated by the caller with at least elen*2 components.
+		static int Gen_Scale(const int elen, const double* e, const double b, double* h);
 
-	// [h] = [e] * 2		Multiplies an expansion by 2
-	// 'h' must be allocated by the caller with at least elen components. This is exact up to overflows.
-	static void Double(const int elen, const double* e, double* h);
+		// [h] = [e] * 2		Multiplies an expansion by 2
+		// 'h' must be allocated by the caller with at least elen components. This is exact up to overflows.
+		static void Double(const int elen, const double* e, double* h);
 
-	// [h] = [e] * n		Multiplies an expansion by n
-	// If 'n' is a power of two, the multiplication is exact
-	static void ExactScale(const int elen, double* e, const double n);
+		// [h] = [e] * n		Multiplies an expansion by n
+		// If 'n' is a power of two, the multiplication is exact
+		static void ExactScale(const int elen, double* e, const double n);
 
-	// [h] = [a] * [b]
-	// 'h' must be allocated by the caller with at least 2*alen*blen components.
-	static int Sub_product(const int alen, const double* a, const int blen, const double* b, double* h);
+		// [h] = [a] * [b]
+		// 'h' must be allocated by the caller with at least 2*alen*blen components.
+		static int Sub_product(const int alen, const double* a, const int blen, const double* b, double* h);
 
-	// [h] = [a] * [b]
-	// 'h' must be allocated by the caller with at least MAX(2*alen*blen, 8) components.
-	static int Gen_Product(const int alen, const double* a, const int blen, const double* b, double* h);
+		// [h] = [a] * [b]
+		// 'h' must be allocated by the caller with at least MAX(2*alen*blen, 8) components.
+		static int Gen_Product(const int alen, const double* a, const int blen, const double* b, double* h);
 
-	// Same as above, but 'h' is allocated internally. The caller must still call 'free' to release the memory.
-	static int Gen_Product_With_Alloc(const int alen, const double* a, const int blen, const double* b, double** h);
+		// Same as above, but 'h' is allocated internally. The caller must still call 'free' to release the memory.
+		static int Gen_Product_With_Alloc(const int alen, const double* a, const int blen, const double* b, double** h);
 
-	static int Gen_Square(const int alen, const double* a, double* h);
+		static int Gen_Square(const int alen, const double* a, double* h);
 
-	// Assume that *h is pre-allocated with hlen doubles.
-	// If more elements are required, *h is re-allocated internally.
-	// In any case, the function returns the size of the resulting expansion.
-	// The caller must verify whether reallocation took place, and possibly call 'free' to release the memory.
-	// When reallocation takes place, *h becomes different from its original value.
-	static int Double_With_PreAlloc(const int elen, const double* e, double** h, const int hlen);
-	static int Gen_Scale_With_PreAlloc(const int elen, const double* e, const double& b, double** h, const int hlen);
-	static int Gen_Sum_With_PreAlloc(const int elen, const double* e, const int flen, const double* f, double** h, const int hlen);
-	static int Gen_Diff_With_PreAlloc(const int elen, const double* e, const int flen, const double* f, double** h, const int hlen);
-	static int Gen_Product_With_PreAlloc(const int alen, const double* a, const int blen, const double* b, double** h, const int hlen);
+		// Assume that *h is pre-allocated with hlen doubles.
+		// If more elements are required, *h is re-allocated internally.
+		// In any case, the function returns the size of the resulting expansion.
+		// The caller must verify whether reallocation took place, and possibly call 'free' to release the memory.
+		// When reallocation takes place, *h becomes different from its original value.
+		static int Double_With_PreAlloc(const int elen, const double* e, double** h, const int hlen);
+		static int Gen_Scale_With_PreAlloc(const int elen, const double* e, const double& b, double** h, const int hlen);
+		static int Gen_Sum_With_PreAlloc(const int elen, const double* e, const int flen, const double* f, double** h, const int hlen);
+		static int Gen_Diff_With_PreAlloc(const int elen, const double* e, const int flen, const double* f, double** h, const int hlen);
+		static int Gen_Product_With_PreAlloc(const int alen, const double* a, const int blen, const double* b, double** h, const int hlen);
 
-	// Approximates the expansion to a double
-	static double To_Double(const int elen, const double* e);
+		// Approximates the expansion to a double
+		static double To_Double(const int elen, const double* e);
 
-	static void print(const int elen, const double* e);
+		static void print(const int elen, const double* e);
 
 #ifndef USE_AVX2_INSTRUCTIONS 
-	static void Split(double a, double& _ah, double& _al);
-	static void Two_Prod_PreSplit(double a, double b, double _bh, double _bl, double& x, double& y);
-	static void Two_Product_2Presplit(double a, double _ah, double _al, double b, double _bh, double _bl, double& x, double& y);
+		static void Split(double a, double& _ah, double& _al);
+		static void Two_Prod_PreSplit(double a, double b, double _bh, double _bl, double& x, double& y);
+		static void Two_Product_2Presplit(double a, double _ah, double _al, double b, double _bh, double _bl, double& x, double& y);
 #endif
-};
+	};
 
 
-//////////////////////////////////////////////////////////////////////////////////////////
-//
-// User-friendly interface for expansion arithmetic
-//
-//////////////////////////////////////////////////////////////////////////////////////////
+	//////////////////////////////////////////////////////////////////////////////////////////
+	//
+	// User-friendly interface for expansion arithmetic
+	//
+	//////////////////////////////////////////////////////////////////////////////////////////
 
-// Values of type double can be used to initialize numbers of type s_expansion.
-// Operations on s_expansion numbers produce expansion numbers that can be combined with
-// each other into polynomial expressions.
-//
-// All expansions are allocated within an 'expansionPool' object that can be stored in
-// the stack. Before using expansions within a scope, an object O of type expansionPool 
-// must be declared, and the function expansion::initPool(&O) must be called.
-//
-// Example:
-//
-// int dot2dSign(s_expansion px, s_expansion py, s_expansion qx, s_expansion qy) {
-//		expansionPool O;
-//		expansion::initPool(&O);
-//
-//		const expansion dx = px*qx;
-//		const expansion dy = qx*qy;
-//		const expansion dot = dx+dy;
-//		return sgn(dot);
-// }
-//
-// Note that the pool is unique for all the expansions! A call to initPool
-// resets all expansions in ANY scope.
+	// Values of type double can be used to initialize numbers of type s_expansion.
+	// Operations on s_expansion numbers produce expansion numbers that can be combined with
+	// each other into polynomial expressions.
+	//
+	// All expansions are allocated within an 'expansionPool' object that can be stored in
+	// the stack. Before using expansions within a scope, an object O of type expansionPool 
+	// must be declared, and the function expansion::initPool(&O) must be called.
+	//
+	// Example:
+	//
+	// int dot2dSign(s_expansion px, s_expansion py, s_expansion qx, s_expansion qy) {
+	//		expansionPool O;
+	//		expansion::initPool(&O);
+	//
+	//		const expansion dx = px*qx;
+	//		const expansion dy = qx*qy;
+	//		const expansion dot = dx+dy;
+	//		return sgn(dot);
+	// }
+	//
+	// Note that the pool is unique for all the expansions! A call to initPool
+	// resets all expansions in ANY scope.
 
 
-// Expansion pool - size can be changed as long as it leaves sufficient room
-// on the stack for all the other operations.
+	// Expansion pool - size can be changed as long as it leaves sufficient room
+	// on the stack for all the other operations.
 
 #define EXPANSION_POOL_SIZE	16384
 
-struct expansionPool {
-	double pool[EXPANSION_POOL_SIZE];	// The pool
-	double* next;						// First free slot
+	struct expansionPool {
+		double pool[EXPANSION_POOL_SIZE];	// The pool
+		double* next;						// First free slot
 
-	void init() { next = pool; }
-	size_t size() const { return next - pool; }
-};
+		void init() { next = pool; }
+		size_t size() const { return next - pool; }
+	};
 
 
-// Generic expansion
-class expansion {
-	inline static thread_local expansionPool *pool;
+	// Generic expansion
+	class expansion {
+		inline static thread_local expansionPool* pool;
 
-public:
-	double* els;	// Elements of the expansion
-	size_t len;		// Number of elements
+	public:
+		double* els;	// Elements of the expansion
+		size_t len;		// Number of elements
 
-	expansion() { }
+		expansion() {}
 
-	static void initPool(expansionPool* ep) { pool = ep; pool->init(); }
-	static size_t getPoolSize() { return pool->size(); }
+		static void initPool(expansionPool* ep) { pool = ep; pool->init(); }
+		static size_t getPoolSize() { return pool->size(); }
 
-	expansion operator+(const expansion& e) const;
-	expansion operator-(const expansion& e) const;
-	expansion operator*(const expansion& e) const;
-	expansion operator-(const double d) const;
-	expansion operator*(const double& d) const;
+		expansion operator+(const expansion& e) const;
+		expansion operator-(const expansion& e) const;
+		expansion operator*(const expansion& e) const;
+		expansion operator-(const double d) const;
+		expansion operator*(const double& d) const;
 
-	void operator=(const double d);
+		void operator=(const double d);
 
-	expansion sqr() const;
+		expansion sqr() const;
 
-	double get_d() const { return els[len - 1]; }
+		double get_d() const { return els[len - 1]; }
 
-	void negate() { expansionObject::Gen_Invert((int)len, els); }
+		void negate() { expansionObject::Gen_Invert((int)len, els); }
 
-protected:
-	expansion(double* pn) : els(pn) { }
-	expansion(size_t s);
+	protected:
+		expansion(double* pn) : els(pn) {}
+		expansion(size_t s);
 
-	void resize(size_t l);
+		void resize(size_t l);
 
-	friend class s_expansion;
-};
+		friend class s_expansion;
+	};
 
-std::ostream& operator<<(std::ostream& os, const expansion& p);
+	std::ostream& operator<<(std::ostream& os, const expansion& p);
 
-int sgn(const expansion& e);
+	int sgn(const expansion& e);
 
-// Singleton expansion
-class s_expansion {
-public:
-	double val;
+	// Singleton expansion
+	class s_expansion {
+	public:
+		double val;
 
-	s_expansion(const double d) : val(d) {}
+		s_expansion(const double d) : val(d) {}
 
-	expansion operator+(const s_expansion& e) const;
-	expansion operator-(const s_expansion& e) const;
-	expansion operator*(const s_expansion& e) const;
-	expansion operator*(const expansion& e) const;
+		expansion operator+(const s_expansion& e) const;
+		expansion operator-(const s_expansion& e) const;
+		expansion operator*(const s_expansion& e) const;
+		expansion operator*(const expansion& e) const;
 
-	operator double() const { return val; }
-};
+		operator double() const { return val; }
+	};
 
-expansion operator-(const double& d, const s_expansion& e);
+	expansion operator-(const double& d, const s_expansion& e);
 
 
 #ifdef USE_GNU_GMP_CLASSES
-typedef mpz_class bignatural;
-typedef mpq_class bigfloat;
-typedef mpq_class bigrational;
+	typedef mpz_class bignatural;
+	typedef mpq_class bigfloat;
+	typedef mpq_class bigrational;
 
-inline void read_rational(FILE* fp, bigrational& r) {
-	gmp_fscanf(fp, "%Qd,", r.get_mpq_t()); ungetc(',', fp);
-}
+	inline void read_rational(FILE* fp, bigrational& r) {
+		gmp_fscanf(fp, "%Qd,", r.get_mpq_t()); ungetc(',', fp);
+	}
 
-inline bigfloat getBigFloatFromRational(const bigrational& r, uint32_t prec_bits) { return r; }
+	inline bigfloat getBigFloatFromRational(const bigrational& r, uint32_t prec_bits) { return r; }
 
-inline bigfloat sqrt(const bigfloat& f, uint32_t prec_bits) {
-	mpf_class bf(f, prec_bits);
-	mpf_class s = sqrt(bf);
-	return mpq_class(s);
-}
+	inline bigfloat sqrt(const bigfloat& f, uint32_t prec_bits) {
+		mpf_class bf(f, prec_bits);
+		mpf_class s = sqrt(bf);
+		return mpq_class(s);
+	}
 
-inline int32_t log2(const bigfloat& f) {
-	mpf_class bf(f);
-	return bf.get_mpf_t()->_mp_exp + (int32_t)bf.get_prec() - 1;
-}
+	inline int32_t log2(const bigfloat& f) {
+		mpf_class bf(f);
+		return bf.get_mpf_t()->_mp_exp + (int32_t)bf.get_prec() - 1;
+	}
 
-inline void add1ULP(bigfloat& f) {
-	mpf_class bf(f);
-	mpf_class ulp(1U, bf.get_prec());
-	ulp.get_mpf_t()->_mp_exp = bf.get_mpf_t()->_mp_exp;
-	bf += ulp;
-}
+	inline void add1ULP(bigfloat& f) {
+		mpf_class bf(f);
+		mpf_class ulp(1U, bf.get_prec());
+		ulp.get_mpf_t()->_mp_exp = bf.get_mpf_t()->_mp_exp;
+		bf += ulp;
+	}
 
 #else
-/////////////////////////////////////////////////////////////////////
-// 	   
-// 	   B I G   N A T U R A L
-// 
-/////////////////////////////////////////////////////////////////////
-
-// A bignatural is an arbitrarily large non-negative integer.
-// It is made of a sequence of digits in base 2^64.
-// Leading zero-digits are not allowed.
-// The value 'zero' is represented by an empty digit sequence.
-
-class bignatural {
-protected:
-	uint32_t m_capacity;	// Current vector capacity
-	uint32_t m_size;		// Actual number of digits
-	uint64_t* digits;	    // Ptr to the digits
+	/////////////////////////////////////////////////////////////////////
+	// 	   
+	// 	   B I G   N A T U R A L
+	// 
+	/////////////////////////////////////////////////////////////////////
+
+	// A bignatural is an arbitrarily large non-negative integer.
+	// It is made of a sequence of digits in base 2^64.
+	// Leading zero-digits are not allowed.
+	// The value 'zero' is represented by an empty digit sequence.
+
+	class bignatural {
+	protected:
+		uint32_t m_capacity;	// Current vector capacity
+		uint32_t m_size;		// Actual number of digits
+		uint64_t* digits;	    // Ptr to the digits
 
-	static uint64_t* BN_ALLOC(uint32_t num_bytes);
-	static void BN_FREE(uint64_t* ptr);
+		static uint64_t* BN_ALLOC(uint32_t num_bytes);
+		static void BN_FREE(uint64_t* ptr);
 
-	// Read as many decimal digits as possible from s so that they fit a uint64_t
-	// Return the number of digits read
-	static size_t scan_uint64_t(const char *s, uint64_t& t);
+		// Read as many decimal digits as possible from s so that they fit a uint64_t
+		// Return the number of digits read
+		static size_t scan_uint64_t(const char* s, uint64_t& t);
 
-	void init(const bignatural& m);
-	void init(const uint32_t m);
-	void init(const uint64_t m);
-	void init(FILE* fp);
-	void init(const char *s);
+		void init(const bignatural& m);
+		void init(const uint32_t m);
+		void init(const uint64_t m);
+		void init(FILE* fp);
+		void init(const char* s);
 
-public:
-	// Creates a 'zero'
-	bignatural();
+	public:
+		// Creates a 'zero'
+		bignatural();
 
-	// Destructor
-	~bignatural();
+		// Destructor
+		~bignatural();
 
-	// Copy constructor
-	bignatural(const bignatural& m);
+		// Copy constructor
+		bignatural(const bignatural& m);
 
-	// Move constructor
-	bignatural(bignatural&& m) noexcept;
+		// Move constructor
+		bignatural(bignatural&& m) noexcept;
 
-	// Construct from unsigned 32bit integer
-	bignatural(uint32_t m);
+		// Construct from unsigned 32bit integer
+		bignatural(uint32_t m);
 
-	// Construct from unsigned 64bit integer
-	bignatural(uint64_t m);
+		// Construct from unsigned 64bit integer
+		bignatural(uint64_t m);
 
-	// Construct from null-terminated string
-	bignatural(const char *s);
+		// Construct from null-terminated string
+		bignatural(const char* s);
 
-	// Construct from FILE stream
-	bignatural(FILE* f);
+		// Construct from FILE stream
+		bignatural(FILE* f);
 
-	// If the number fits a uint64_t convert and return true
-	bool toUint64(uint64_t& n) const;
+		// If the number fits a uint64_t convert and return true
+		bool toUint64(uint64_t& n) const;
 
-	// Assignment operators
-	bignatural& operator=(const bignatural& m);
-	bignatural& operator=(const uint64_t m);
+		// Assignment operators
+		bignatural& operator=(const bignatural& m);
+		bignatural& operator=(const uint64_t m);
 
-	// Get the least significant digit
-	const uint64_t& back() const;
+		// Get the least significant digit
+		const uint64_t& back() const;
 
-	// Get the i'th digit
-	const uint64_t& operator[](int i) const;
+		// Get the i'th digit
+		const uint64_t& operator[](int i) const;
 
-	// Number of significant digits
-	uint32_t size() const;
+		// Number of significant digits
+		uint32_t size() const;
 
-	// TRUE if number is zero
-	bool empty() const;
+		// TRUE if number is zero
+		bool empty() const;
 
-	// Number of significant bits
-	uint32_t getNumSignificantBits() const;
+		// Number of significant bits
+		uint32_t getNumSignificantBits() const;
 
-	// Get the i'th bit
-	bool getBit(uint32_t i) const;
+		// Get the i'th bit
+		bool getBit(uint32_t i) const;
 
-	// Left-shift by n bits and possibly add limbs as necessary
-	void operator<<=(uint32_t n);
-	bignatural operator<<(uint32_t n) const;
+		// Left-shift by n bits and possibly add limbs as necessary
+		void operator<<=(uint32_t n);
+		bignatural operator<<(uint32_t n) const;
 
-	// Right-shift by n bits
-	void operator>>=(uint32_t n);
-	bignatural operator>>(uint32_t n) const;
+		// Right-shift by n bits
+		void operator>>=(uint32_t n);
+		bignatural operator>>(uint32_t n) const;
 
-	// Comparison operators
-	bool operator==(const bignatural& b) const;
-	bool operator!=(const bignatural& b) const;
-	bool operator>=(const bignatural& b) const;
-	bool operator>(const bignatural& b) const;
-	bool operator<=(const bignatural& b) const;
-	bool operator<(const bignatural& b) const;
+		// Comparison operators
+		bool operator==(const bignatural& b) const;
+		bool operator!=(const bignatural& b) const;
+		bool operator>=(const bignatural& b) const;
+		bool operator>(const bignatural& b) const;
+		bool operator<=(const bignatural& b) const;
+		bool operator<(const bignatural& b) const;
 
-	// TRUE if number is exactly 1
-	bool isOne() const { return m_size == 1 && *digits == 1; }
+		// TRUE if number is exactly 1
+		bool isOne() const { return m_size == 1 && *digits == 1; }
 
-	// Arithmetic operations
-	bignatural& operator+=(const bignatural& b);
-	bignatural& operator+=(const uint32_t b);
-	bignatural& operator+=(const uint64_t b);
-	bignatural operator+(const bignatural& b) const;
-	bignatural operator+(const uint32_t b) const;
-	bignatural operator+(const uint64_t b) const;
+		// Arithmetic operations
+		bignatural& operator+=(const bignatural& b);
+		bignatural& operator+=(const uint32_t b);
+		bignatural& operator+=(const uint64_t b);
+		bignatural operator+(const bignatural& b) const;
+		bignatural operator+(const uint32_t b) const;
+		bignatural operator+(const uint64_t b) const;
 
-	// Assume that b is smaller than or equal to this number!
-	bignatural& operator-=(const bignatural& b);
-	bignatural operator-(const bignatural& b) const;
+		// Assume that b is smaller than or equal to this number!
+		bignatural& operator-=(const bignatural& b);
+		bignatural operator-(const bignatural& b) const;
 
-	bignatural operator*(const bignatural& b) const;
-	bignatural& operator*=(const bignatural& b);
-	bignatural& operator*=(const uint64_t b);
+		bignatural operator*(const bignatural& b) const;
+		bignatural& operator*=(const bignatural& b);
+		bignatural& operator*=(const uint64_t b);
 
-	// Short division
-	bignatural divide_by(const uint64_t D, uint64_t& remainder) const;
+		// Short division
+		bignatural divide_by(const uint64_t D, uint64_t& remainder) const;
 
-	// Long division
-	bignatural divide_by(const bignatural& divisor, bignatural& remainder) const;
+		// Long division
+		bignatural divide_by(const bignatural& divisor, bignatural& remainder) const;
 
-	// Long sqrt (truncated)
-	bignatural sqrt() const;
+		// Long sqrt (truncated)
+		bignatural sqrt() const;
 
-	// Bitwise OR
-	bignatural operator|(const bignatural& b) const;
-	void operator|=(uint64_t i);
+		// Bitwise OR
+		bignatural operator|(const bignatural& b) const;
+		void operator|=(uint64_t i);
 
-	// Greatest common divisor
-	bignatural GCD(const bignatural& D) const;
+		// Greatest common divisor
+		bignatural GCD(const bignatural& D) const;
 
-	// TRUE if this number and D have no common factors
-	bool coprime(const bignatural& D) const;
+		// TRUE if this number and D have no common factors
+		bool coprime(const bignatural& D) const;
 
-	// String representation in decimal form
-	std::string get_dec_str() const;
+		// String representation in decimal form
+		std::string get_dec_str() const;
 
-	// String representation in binary form
-	std::string get_str() const;
+		// String representation in binary form
+		std::string get_str() const;
 
-	// Count number of zeroes on the right (least significant binary digits)
-	uint32_t countEndingZeroes() const;
+		// Count number of zeroes on the right (least significant binary digits)
+		uint32_t countEndingZeroes() const;
 
-protected:
-	uint64_t& back();
+	protected:
+		uint64_t& back();
 
-	void pop_back();
+		void pop_back();
 
-	uint64_t& operator[](int i);
+		uint64_t& operator[](int i);
 
-	void push_back(uint64_t b);
+		void push_back(uint64_t b);
 
-	// Left-shift. Same as <<= but assumes that number is not zero!
-	void leftShift(uint32_t n);
+		// Left-shift. Same as <<= but assumes that number is not zero!
+		void leftShift(uint32_t n);
 
-	void push_bit_back(uint32_t b);
+		void push_bit_back(uint32_t b);
 
-	void reserve(uint32_t n);
+		void reserve(uint32_t n);
 
-	void resize(uint32_t n);
+		void resize(uint32_t n);
 
-	void fill(uint64_t v);
+		void fill(uint64_t v);
 
-	void fillWithZeroes() { memset(digits, 0, m_size * sizeof(uint64_t)); }
+		void fillWithZeroes() { memset(digits, 0, m_size * sizeof(uint64_t)); }
 
-	void pop_front();
+		void pop_front();
 
-	// Count number of zeroes on the left (most significant digits).
-	// Assumes that number is not zero!
-	uint32_t countLeadingZeroes() const;
+		// Count number of zeroes on the left (most significant digits).
+		// Assumes that number is not zero!
+		uint32_t countLeadingZeroes() const;
 
-	// Count number of zeroes on the right of the last 1 in the least significant limb
-	// Assumes that number is not zero and last limb is not zero!
-	uint32_t countEndingZeroesLSL() const;
+		// Count number of zeroes on the right of the last 1 in the least significant limb
+		// Assumes that number is not zero and last limb is not zero!
+		uint32_t countEndingZeroesLSL() const;
 
-	// Both the following assume that the number is not zero!
-	bool is_odd() const { return (back() & 1); }
-	bool is_even() const { return !is_odd(); }
+		// Both the following assume that the number is not zero!
+		bool is_odd() const { return (back() & 1); }
+		bool is_even() const { return !is_odd(); }
 
-	// Greatest common divisor
-	// This assumes the particular case where none of the two
-	// numbers is zero.
-	bignatural GCD_non_zero(const bignatural& D) const;
+		// Greatest common divisor
+		// This assumes the particular case where none of the two
+		// numbers is zero.
+		bignatural GCD_non_zero(const bignatural& D) const;
 
-	void pack();
+		void pack();
 
-	// a and b must NOT be this number!
-	void toSum(const bignatural& a, const bignatural& b);
+		// a and b must NOT be this number!
+		void toSum(const bignatural& a, const bignatural& b);
 
-	// a and b must NOT be this number!
-	// Assume that b is smaller or equal than a!
-	void toDiff(const bignatural& a, const bignatural& b);
+		// a and b must NOT be this number!
+		// Assume that b is smaller or equal than a!
+		void toDiff(const bignatural& a, const bignatural& b);
 
-	// a and b must NOT be this number!
-	void toProd(const bignatural& a, const bignatural& b);
+		// a and b must NOT be this number!
+		void toProd(const bignatural& a, const bignatural& b);
 
-	// Short division with no remainder
-	bignatural divide_by_exact(const uint64_t D) const;
+		// Short division with no remainder
+		bignatural divide_by_exact(const uint64_t D) const;
 
-	// Long division with no remainder
-	bignatural divide_by_exact(const bignatural& divisor) const;
+		// Long division with no remainder
+		bignatural divide_by_exact(const bignatural& divisor) const;
 
-private:
-	// Multiplies by a single limb, left shift, and add to accumulator. Does not pack!
-	void addmul(uint64_t b, uint32_t left_shifts, bignatural& result) const;
+	private:
+		// Multiplies by a single limb, left shift, and add to accumulator. Does not pack!
+		void addmul(uint64_t b, uint32_t left_shifts, bignatural& result) const;
 
-	// Increases the vector capacity while maintaining the number validity
-	void increaseCapacity(uint32_t new_capacity);
+		// Increases the vector capacity while maintaining the number validity
+		void increaseCapacity(uint32_t new_capacity);
 
-	// Adds one most significant digit while making room if necessary
-	void addOneMostSignificantDigit(uint64_t d);
+		// Adds one most significant digit while making room if necessary
+		void addOneMostSignificantDigit(uint64_t d);
 
-	// Memory pool for bignaturals.
-	inline static thread_local MultiPool nfgMemoryPool;
+		// Memory pool for bignaturals.
+		inline static thread_local MultiPool nfgMemoryPool;
 
-	friend class bigfloat;
-	friend class bigrational;
-};
+		friend class bigfloat;
+		friend class bigrational;
+	};
 
-// Operators with left-hand primitive integers
-inline bignatural operator+(uint32_t a, const bignatural& p) { return p + a; }
-inline bignatural operator+(uint64_t a, const bignatural& p) { return p + a; }
-inline bignatural operator*(uint64_t a, const bignatural& p) { return p * a; }
+	// Operators with left-hand primitive integers
+	inline bignatural operator+(uint32_t a, const bignatural& p) { return p + a; }
+	inline bignatural operator+(uint64_t a, const bignatural& p) { return p + a; }
+	inline bignatural operator*(uint64_t a, const bignatural& p) { return p * a; }
 
-inline bignatural sqrt(const bignatural& n) { return n.sqrt(); }
+	inline bignatural sqrt(const bignatural& n) { return n.sqrt(); }
 
-inline std::ostream& operator<<(std::ostream& os, const bignatural& p)
-{
-	os << p.get_dec_str();
-	return os;
-}
+	inline std::ostream& operator<<(std::ostream& os, const bignatural& p)
+	{
+		os << p.get_dec_str();
+		return os;
+	}
 
-/////////////////////////////////////////////////////////////////////
-// 	   
-// 	   B I G   F L O A T
-// 
-/////////////////////////////////////////////////////////////////////
+	/////////////////////////////////////////////////////////////////////
+	// 	   
+	// 	   B I G   F L O A T
+	// 
+	/////////////////////////////////////////////////////////////////////
 
-// A bigfloat is a floting point number with arbitrarily large mantissa.
-// In principle, we could have made the exponent arbitrarily large too,
-// but in practice this appears to be useless.
-// Exponents are in the range [-INT32_MAX, INT32_MAX]
-//
-// A bigfloat f evaluates to f = sign * mantissa * 2^exponent
-//
-// mantissa is a bignatural whose least significant bit is 1.
-// Number is zero if mantissa is empty.
+	// A bigfloat is a floting point number with arbitrarily large mantissa.
+	// In principle, we could have made the exponent arbitrarily large too,
+	// but in practice this appears to be useless.
+	// Exponents are in the range [-INT32_MAX, INT32_MAX]
+	//
+	// A bigfloat f evaluates to f = sign * mantissa * 2^exponent
+	//
+	// mantissa is a bignatural whose least significant bit is 1.
+	// Number is zero if mantissa is empty.
 
-class bigfloat {
-	bignatural mantissa; // .back() is less significant
-	int32_t exponent; // In principle we might still have under/overflows, but not in practice
-	int32_t sign;	// Redundant but keeps alignment
+	class bigfloat {
+		bignatural mantissa; // .back() is less significant
+		int32_t exponent; // In principle we might still have under/overflows, but not in practice
+		int32_t sign;	// Redundant but keeps alignment
 
-public:
-	// Default constructor creates a zero-valued bigfloat
-	bigfloat();
+	public:
+		// Default constructor creates a zero-valued bigfloat
+		bigfloat();
 
-	// Lossless conversion from double
-	bigfloat(const double d);
+		// Lossless conversion from double
+		bigfloat(const double d);
 
-	// Constructs from a bignatural
-	bigfloat(const bignatural& m, int32_t e, int32_t s);
+		// Constructs from a bignatural
+		bigfloat(const bignatural& m, int32_t e, int32_t s);
 
-	// Truncated approximation
-	double get_d() const;
+		// Truncated approximation
+		double get_d() const;
 
-	// Compute a sqrt as precise as prec_bits bits (num. bits in resulting mantissa)
-	bigfloat sqrt(uint32_t prec_bits) const;
+		// Compute a sqrt as precise as prec_bits bits (num. bits in resulting mantissa)
+		bigfloat sqrt(uint32_t prec_bits) const;
 
-	// Truncated base-2 logarithm
-	int32_t log2() const;
+		// Truncated base-2 logarithm
+		int32_t log2() const;
 
-	// Adds one ULP to the number
-	void increaseMantissa();
+		// Adds one ULP to the number
+		void increaseMantissa();
 
-	// Arithmetic operations
-	bigfloat operator+(const bigfloat& b) const;
-	bigfloat operator-(const bigfloat& b) const;
-	bigfloat operator*(const bigfloat& b) const;
+		// Arithmetic operations
+		bigfloat operator+(const bigfloat& b) const;
+		bigfloat operator-(const bigfloat& b) const;
+		bigfloat operator*(const bigfloat& b) const;
 
-	// Comparison
-	bool operator==(const bigfloat& b) const;
-	bool operator!=(const bigfloat& b) const;
-	bool operator<(const bigfloat& b) const;
-	bool operator>(const bigfloat& b) const;
+		// Comparison
+		bool operator==(const bigfloat& b) const;
+		bool operator!=(const bigfloat& b) const;
+		bool operator<(const bigfloat& b) const;
+		bool operator>(const bigfloat& b) const;
 
-	// Sign switch
-	void invert();
+		// Sign switch
+		void invert();
 
-	bigfloat inverse() const;
+		bigfloat inverse() const;
 
-	// Get sign
-	int sgn() const;
+		// Get sign
+		int sgn() const;
 
-	// Convert to string (binary exponential representation)
-	std::string get_str() const;
+		// Convert to string (binary exponential representation)
+		std::string get_str() const;
 
-	// Access components
-	const bignatural& getMantissa() const;
-	int32_t getExponent() const;
+		// Access components
+		const bignatural& getMantissa() const;
+		int32_t getExponent() const;
 
-private:
-	// Right-shift as long as the least significant bit is zero
-	void pack();
+	private:
+		// Right-shift as long as the least significant bit is zero
+		void pack();
 
-	// Left-shift the mantissa by n bits and reduce the exponent accordingly
-	void leftShift(uint32_t n);
+		// Left-shift the mantissa by n bits and reduce the exponent accordingly
+		void leftShift(uint32_t n);
 
-	// Right-shift the mantissa by n bits and reduce the exponent accordingly
-	void rightShift(uint32_t n);
-};
+		// Right-shift the mantissa by n bits and reduce the exponent accordingly
+		void rightShift(uint32_t n);
+	};
 
-// Sign operator for bigfloats
-inline int sgn(const bigfloat& f) { return f.sgn(); }
+	// Sign operator for bigfloats
+	inline int sgn(const bigfloat& f) { return f.sgn(); }
 
-// Operators with left-hand doubles
-inline bigfloat operator+(const double a, const bigfloat& p) { return p + a; }
-inline bigfloat operator-(const double a, const bigfloat& p) { return (p - a).inverse(); }
-inline bigfloat operator*(const double a, const bigfloat& p) { return p * a; }
+	// Operators with left-hand doubles
+	inline bigfloat operator+(const double a, const bigfloat& p) { return p + a; }
+	inline bigfloat operator-(const double a, const bigfloat& p) { return (p - a).inverse(); }
+	inline bigfloat operator*(const double a, const bigfloat& p) { return p * a; }
 
-// Sign inversion operator for bigfloats
-inline bigfloat operator-(const bigfloat& f) { return f.inverse(); }
+	// Sign inversion operator for bigfloats
+	inline bigfloat operator-(const bigfloat& f) { return f.inverse(); }
 
-inline bigfloat sqrt(const bigfloat& f, uint32_t prec_bits) {
-	return f.sqrt(prec_bits);
-}
+	inline bigfloat sqrt(const bigfloat& f, uint32_t prec_bits) {
+		return f.sqrt(prec_bits);
+	}
 
-inline int32_t log2(const bigfloat& f) { return f.log2(); }
+	inline int32_t log2(const bigfloat& f) { return f.log2(); }
 
-inline void add1ULP(bigfloat& f) { f.increaseMantissa(); }
+	inline void add1ULP(bigfloat& f) { f.increaseMantissa(); }
 
-// std::ostream interface (decimal exponential representation)
-inline std::ostream& operator<<(std::ostream& os, const bigfloat& p) {
-	if (p.sgn() < 0) os << "-";
-	os << p.getMantissa().get_dec_str() << " * 2^" << p.getExponent();
-	return os;
-}
+	// std::ostream interface (decimal exponential representation)
+	inline std::ostream& operator<<(std::ostream& os, const bigfloat& p) {
+		if (p.sgn() < 0) os << "-";
+		os << p.getMantissa().get_dec_str() << " * 2^" << p.getExponent();
+		return os;
+	}
 
 
-/////////////////////////////////////////////////////////////////////
-// 	   
-// 	   B I G   R A T I O N A L
-// 
-/////////////////////////////////////////////////////////////////////
+	/////////////////////////////////////////////////////////////////////
+	// 	   
+	// 	   B I G   R A T I O N A L
+	// 
+	/////////////////////////////////////////////////////////////////////
 
-// A bigrational is a fraction of two bignaturals with a sign.
-// Number is zero if sign is zero
+	// A bigrational is a fraction of two bignaturals with a sign.
+	// Number is zero if sign is zero
 
-class bigrational {
-	bignatural numerator, denominator;
-	int32_t sign;
+	class bigrational {
+		bignatural numerator, denominator;
+		int32_t sign;
 
-public:
-	// Create a zero
-	bigrational() : sign(0) {}
+	public:
+		// Create a zero
+		bigrational() : sign(0) {}
 
-	// Create from a double (lossless)
-	bigrational(const double f) : bigrational(bigfloat(f)) {}
+		// Create from a double (lossless)
+		bigrational(const double f) : bigrational(bigfloat(f)) {}
 
-	// Create from a bigfloat (lossless)
-	bigrational(const bigfloat& f);
+		// Create from a bigfloat (lossless)
+		bigrational(const bigfloat& f);
 
-	// Create from a file
-	bigrational(FILE* fp) { init(fp); }
+		// Create from a file
+		bigrational(FILE* fp) { init(fp); }
 
-	// Create from explicit numerator, denominator and sign.
-	bigrational(const bignatural& num, const bignatural& den, int32_t s) :
-		numerator(num), denominator(den), sign(s) {	}
-	bigrational(uint32_t num, uint32_t den, int32_t s) :
-		numerator(num), denominator(den), sign(s) { }
+		// Create from explicit numerator, denominator and sign.
+		bigrational(const bignatural& num, const bignatural& den, int32_t s) :
+			numerator(num), denominator(den), sign(s) {
+		}
+		bigrational(uint32_t num, uint32_t den, int32_t s) :
+			numerator(num), denominator(den), sign(s) {
+		}
 
-	// Convert to multiplicative inverse
-	void invert();
+		// Convert to multiplicative inverse
+		void invert();
 
-	// Return multiplicative inverse
-	bigrational inverse() const;
+		// Return multiplicative inverse
+		bigrational inverse() const;
 
-	// Invert sign
-	void negate();
+		// Invert sign
+		void negate();
 
-	// Return additive inverse
-	bigrational negation() const;
+		// Return additive inverse
+		bigrational negation() const;
 
-	// Arithmetic operations
-	bigrational operator+(const bigrational& r) const;
-	bigrational operator-(const bigrational& r) const;
-	bigrational operator*(const bigrational& r) const;
-	bigrational operator/(const bigrational& r) const;
+		// Arithmetic operations
+		bigrational operator+(const bigrational& r) const;
+		bigrational operator-(const bigrational& r) const;
+		bigrational operator*(const bigrational& r) const;
+		bigrational operator/(const bigrational& r) const;
 
-	// Comparison operators
-	bool operator==(const bigrational& r) const;
-	bool operator!=(const bigrational& r) const;
-	bool operator>(const bigrational& r) const;
-	bool operator>=(const bigrational& r) const;
-	bool operator<(const bigrational& r) const;
-	bool operator<=(const bigrational& r) const;
-	bool hasEqualModule(const bigrational& r) const;
-	bool hasGreaterModule(const bigrational& r) const;
-	bool hasGrtrOrEqModule(const bigrational& r) const;
+		// Comparison operators
+		bool operator==(const bigrational& r) const;
+		bool operator!=(const bigrational& r) const;
+		bool operator>(const bigrational& r) const;
+		bool operator>=(const bigrational& r) const;
+		bool operator<(const bigrational& r) const;
+		bool operator<=(const bigrational& r) const;
+		bool hasEqualModule(const bigrational& r) const;
+		bool hasGreaterModule(const bigrational& r) const;
+		bool hasGrtrOrEqModule(const bigrational& r) const;
 
-	// Conversion to double (truncated)
-	double get_d() const;
+		// Conversion to double (truncated)
+		double get_d() const;
 
-	// Conversion to bigfloat (truncated)
-	bigfloat get_bigfloat(uint32_t num_significant_bits) const;
+		// Conversion to bigfloat (truncated)
+		bigfloat get_bigfloat(uint32_t num_significant_bits) const;
 
-	// Access to components
-	const bignatural& get_num() const;
-	const bignatural& get_den() const;
+		// Access to components
+		const bignatural& get_num() const;
+		const bignatural& get_den() const;
 
-	// Get sign
-	int32_t sgn() const;
+		// Get sign
+		int32_t sgn() const;
 
-	// Return decimal representation
-	std::string get_dec_str() const;
+		// Return decimal representation
+		std::string get_dec_str() const;
 
-	// Return binary representation
-	std::string get_str() const;
+		// Return binary representation
+		std::string get_str() const;
 
-protected:
-	// Make numerator and denominator coprime (divide both by GCD)
-	void canonicalize();
+	protected:
+		// Make numerator and denominator coprime (divide both by GCD)
+		void canonicalize();
 
-	// Iteratively divide both num and den by two as long as they are both even
-	void compress();
+		// Iteratively divide both num and den by two as long as they are both even
+		void compress();
 
-	void init(FILE* fp);
-};
+		void init(FILE* fp);
+	};
 
-// Operators with left-hand doubles
-inline bigrational operator+(const double a, const bigrational& p) { return p + a; }
-inline bigrational operator-(const double a, const bigrational& p) { return (p - a).negation(); }
-inline bigrational operator*(const double a, const bigrational& p) { return p * a; }
-inline bigrational operator/(const double a, const bigrational& p) { return bigrational(a) / p; }
+	// Operators with left-hand doubles
+	inline bigrational operator+(const double a, const bigrational& p) { return p + a; }
+	inline bigrational operator-(const double a, const bigrational& p) { return (p - a).negation(); }
+	inline bigrational operator*(const double a, const bigrational& p) { return p * a; }
+	inline bigrational operator/(const double a, const bigrational& p) { return bigrational(a) / p; }
 
-// Sign inversion operator for bigrationals
-inline bigrational operator-(const bigrational& p) { return p.negation(); }
+	// Sign inversion operator for bigrationals
+	inline bigrational operator-(const bigrational& p) { return p.negation(); }
 
-// Sign operator for bigrationals
-inline int32_t sgn(const bigrational& p) { return p.sgn(); }
+	// Sign operator for bigrationals
+	inline int32_t sgn(const bigrational& p) { return p.sgn(); }
 
-// std::ostream interface (decimal fraction representation)
-inline std::ostream& operator<<(std::ostream& os, const bigrational& p)
-{
-	os << p.get_dec_str();
-	return os;
-}
+	// std::ostream interface (decimal fraction representation)
+	inline std::ostream& operator<<(std::ostream& os, const bigrational& p)
+	{
+		os << p.get_dec_str();
+		return os;
+	}
 
-inline void read_rational(FILE* fp, bigrational& r) {
-	r = bigrational(fp);
-}
+	inline void read_rational(FILE* fp, bigrational& r) {
+		r = bigrational(fp);
+	}
 
-inline bigfloat getBigFloatFromRational(const bigrational& r, uint32_t prec_bits) { return r.get_bigfloat(prec_bits); }
+	inline bigfloat getBigFloatFromRational(const bigrational& r, uint32_t prec_bits) { return r.get_bigfloat(prec_bits); }
 
 #endif // USE_GNU_GMP_CLASSES
 
 
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// FUNCTION IMPLEMENTATIONS - MEMORY POOLS
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
+	////////////////////////////////////////////////////////////////////////////////////////////
+	// 	   
+	// C O M P I L E R   A N D   A R C H I T E C T U R E - D E P E N D E N T   F U N C T I O N S
+	// 
+	////////////////////////////////////////////////////////////////////////////////////////////
 
-inline void N_memory_pool::addDataBlockArray(size_t tot_size, uint8_t** fs) {
-	uint8_t* data_1 = (uint8_t*)malloc(sizeof(uint8_t) * tot_size);
-	data.push_back(data_1);
-	uint8_t* lst = data_1 + tot_size;
-	while (lst != data_1) {
-		lst -= block_size;
-		*fs++ = lst;
-	}
-}
+#ifdef STDCPLUSPLUS20
+	inline int nfg_count_lz(uint32_t v) { return std::countl_zero(v); }
+	inline int nfg_count_rz(uint32_t v) { return std::countr_zero(v); }
+	inline int nfg_count_lz(uint64_t v) { return std::countl_zero(v); }
+	inline int nfg_count_rz(uint64_t v) { return std::countr_zero(v); }
+#else
 
-inline void N_memory_pool::doubleDataArray() {
-	uint8_t** fs = (uint8_t**)malloc(sizeof(uint8_t*) * size * 2);
-	size_t i = 0, j = size;
-	while (i < size) fs[j++] = stack[i++];
-	free(stack);
-	stack = fs;
-
-	addDataBlockArray(block_size * size, fs);
-
-	last += size;
-	size *= 2;
-}
-
-inline N_memory_pool::N_memory_pool(size_t _size, size_t _block_size) : last(_size), size(_size), block_size(_block_size) {
-	stack = (uint8_t**)malloc(sizeof(uint8_t*) * size);
-	uint8_t** fs = stack;
-	addDataBlockArray(size * block_size, fs);
-}
-
-inline N_memory_pool::~N_memory_pool() {
-	free(stack);
-	for (uint8_t* p : data) free(p);
-	data.clear();
-}
-
-inline void* N_memory_pool::alloc() {
-	if (last == 0) doubleDataArray();
-	return stack[--last];
-}
-
-inline void N_memory_pool::release(void* s) {
-	stack[last++] = (uint8_t*)s;
-}
-
-inline N_memory_pool::N_memory_pool(N_memory_pool&& p) noexcept
-	: data(p.data), stack(p.stack), last(p.last), size(p.size), block_size(p.block_size) {
-	p.stack = nullptr;
-	p.data.clear();
-}
-
-
-inline void IN_pool::addDataBlockArray(uint32_t tot_size, uint32_t extended_block_size, uint32_t** fs) {
-	uint32_t* data_1 = (uint32_t*)malloc(sizeof(uint32_t) * tot_size);
-	data.push_back(data_1);
-	uint32_t* lst = data_1 + tot_size;
-	while (lst != data_1) {
-		lst -= extended_block_size;
-		*lst = block_size;
-		*fs++ = lst + 1;
-	}
-}
-
-inline void IN_pool::doubleDataArray() {
-	const uint32_t extended_block_size = block_size + 1;
-
-	uint32_t** fs = (uint32_t**)malloc(sizeof(uint32_t*) * size * 2);
-	for (uint32_t i = 0; i < size; i++) fs[i + size] = stack[i];
-	free(stack);
-	stack = fs;
-
-	addDataBlockArray(extended_block_size * size, extended_block_size, fs);
-
-	last += size;
-	size *= 2;
-}
-
-inline IN_pool::IN_pool(uint32_t _size, uint32_t _block_size) : last(_size), size(_size), block_size(_block_size) {
-	const uint32_t extended_block_size = block_size + 1;
-	stack = (uint32_t**)malloc(sizeof(uint32_t*) * size);
-	uint32_t** fs = stack;
-	addDataBlockArray(size * extended_block_size, extended_block_size, fs);
-}
-
-
-inline IN_pool::~IN_pool() {
-	free(stack);
-	for (uint32_t* p : data) free(p);
-	data.clear();
-}
-
-inline uint32_t* IN_pool::alloc() {
-	if (last == 0) doubleDataArray();
-	return stack[--last];
-}
-
-inline void IN_pool::release(uint32_t* s) {
-	stack[last++] = s;
-}
-
-inline uint32_t IN_pool::blockSize() const {
-	return block_size;
-}
-
-inline IN_pool::IN_pool(IN_pool&& p) noexcept
-	: data(p.data), stack(p.stack), last(p.last), size(p.size), block_size(p.block_size) {
-	p.stack = nullptr;
-	p.data.clear();
-}
-
-
-inline IN_pool& MultiPool::pickPoolFromSize(uint32_t bs) {
-	uint32_t cz = (uint32_t)nfg_count_lz(bs - 1);
-	cz = (cz == 32) ? (31) : (cz);
-	return IN_pools[31U - cz];
-}
-
-inline MultiPool::MultiPool(uint32_t _max_block_size, uint32_t init_capacity) : max_block_size(_max_block_size) {
-	uint32_t bs = 1;
-	while (bs < max_block_size) {
-		bs <<= 1;
-		IN_pools.push_back(IN_pool(init_capacity, bs));
-	}
-}
-
-inline void* MultiPool::alloc(uint32_t num_bytes) {
-	const uint32_t num_els = ((num_bytes + 3) >> 2);
-	if (num_els > max_block_size) {
-		uint32_t* ptr;
-		if ((ptr = (uint32_t*)malloc(sizeof(uint32_t) * (num_els + 1))) == NULL) return NULL;
-		ptr[0] = 0;
-		return ptr + 1;
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__has_builtin) // GCC and Clang (x86-64, AMD64, ARM64)
+	inline int nfg_count_lz(uint32_t v) { return (v == 0) ? (32) : (__builtin_clz(v)); }
+	inline int nfg_count_rz(uint32_t v) { return (v == 0) ? (32) : (__builtin_ctz(v)); }
+	inline int nfg_count_lz(uint64_t v) { return (v == 0) ? (64) : (__builtin_clzll(v)); }
+	inline int nfg_count_rz(uint64_t v) { return (v == 0) ? (64) : (__builtin_ctzll(v)); }
+#elif defined(_MSC_VER) // MSVC (cl.exe and clang-cl on x86-64, AMD64, ARM64)
+	inline int nfg_count_lz(uint32_t v) {
+		if (v == 0) return 32;
+		unsigned long index;
+		_BitScanReverse(&index, v);
+		return 31 - static_cast<int>(index);
 	}
 
-	return pickPoolFromSize(num_els).alloc();
-}
+	inline int nfg_count_rz(uint32_t v) {
+		if (v == 0) return 32;
+		unsigned long index;
+		_BitScanForward(&index, v);
+		return static_cast<int>(index);
+	}
 
-inline void MultiPool::release(void* s) {
-	if (s) {
-		uint32_t* ps = (((uint32_t*)s) - 1);
-		const uint32_t v = *ps;
-		if (v == 0) {
-			free(ps);
-			return;
+	inline int nfg_count_lz(uint64_t v) {
+		if (v == 0) return 64;
+		unsigned long index;
+		_BitScanReverse64(&index, v);
+		return 63 - static_cast<int>(index);
+	}
+
+	inline int nfg_count_rz(uint64_t v) {
+		if (v == 0) return 64;
+		unsigned long index;
+		_BitScanForward64(&index, v);
+		return static_cast<int>(index);
+	}
+#else // Portable
+	inline int nfg_count_lz(uint32_t v) {
+		if (v == 0) return 32;
+		int count = 0;
+		if ((v & 0xFFFF0000U) == 0) { count += 16; v <<= 16; }
+		if ((v & 0xFF000000U) == 0) { count += 8;  v <<= 8; }
+		if ((v & 0xF0000000U) == 0) { count += 4;  v <<= 4; }
+		if ((v & 0xC0000000U) == 0) { count += 2;  v <<= 2; }
+		if ((v & 0x80000000U) == 0) { count += 1; }
+		return count;
+	}
+
+	inline int nfg_count_rz(uint32_t v) {
+		if (v == 0) return 32;
+		int count = 0;
+		if ((v & 0x0000FFFFU) == 0) { count += 16; v >>= 16; }
+		if ((v & 0x000000FFU) == 0) { count += 8;  v >>= 8; }
+		if ((v & 0x0000000FU) == 0) { count += 4;  v >>= 4; }
+		if ((v & 0x00000003U) == 0) { count += 2;  v >>= 2; }
+		if ((v & 0x00000001U) == 0) { count += 1; }
+		return count;
+	}
+
+
+	inline int nfg_count_lz(uint64_t v) {
+		if (v == 0) return 64;
+		int count = 0;
+		if ((v & 0xFFFFFFFF00000000ULL) == 0) { count += 32; v <<= 32; }
+		if ((v & 0xFFFF000000000000ULL) == 0) { count += 16; v <<= 16; }
+		if ((v & 0xFF00000000000000ULL) == 0) { count += 8;  v <<= 8; }
+		if ((v & 0xF000000000000000ULL) == 0) { count += 4;  v <<= 4; }
+		if ((v & 0xC000000000000000ULL) == 0) { count += 2;  v <<= 2; }
+		if ((v & 0x8000000000000000ULL) == 0) { count += 1; }
+		return count;
+	}
+
+	inline int nfg_count_rz(uint64_t v) {
+		if (v == 0)	return 64;
+		int count = 0;
+		if ((v & 0x00000000FFFFFFFFULL) == 0) { count += 32; v >>= 32; }
+		if ((v & 0x000000000000FFFFULL) == 0) { count += 16; v >>= 16; }
+		if ((v & 0x00000000000000FFULL) == 0) { count += 8;  v >>= 8; }
+		if ((v & 0x000000000000000FULL) == 0) { count += 4;  v >>= 4; }
+		if ((v & 0x0000000000000003ULL) == 0) { count += 2;  v >>= 2; }
+		if ((v & 0x0000000000000001ULL) == 0) { count += 1; }
+		return count;
+	}
+
+#endif
+#endif // STDCPLUSPLUS20
+
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
+	//
+	// FUNCTION IMPLEMENTATIONS - MEMORY POOLS
+	//
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	inline void N_memory_pool::addDataBlockArray(size_t tot_size, uint8_t** fs) {
+		uint8_t* data_1 = (uint8_t*)malloc(sizeof(uint8_t) * tot_size);
+		data.push_back(data_1);
+		uint8_t* lst = data_1 + tot_size;
+		while (lst != data_1) {
+			lst -= block_size;
+			*fs++ = lst;
+		}
+	}
+
+	inline void N_memory_pool::doubleDataArray() {
+		uint8_t** fs = (uint8_t**)malloc(sizeof(uint8_t*) * size * 2);
+		size_t i = 0, j = size;
+		while (i < size) fs[j++] = stack[i++];
+		free(stack);
+		stack = fs;
+
+		addDataBlockArray(block_size * size, fs);
+
+		last += size;
+		size *= 2;
+	}
+
+	inline N_memory_pool::N_memory_pool(size_t _size, size_t _block_size) : last(_size), size(_size), block_size(_block_size) {
+		stack = (uint8_t**)malloc(sizeof(uint8_t*) * size);
+		uint8_t** fs = stack;
+		addDataBlockArray(size * block_size, fs);
+	}
+
+	inline N_memory_pool::~N_memory_pool() {
+		free(stack);
+		for (uint8_t* p : data) free(p);
+		data.clear();
+	}
+
+	inline void* N_memory_pool::alloc() {
+		if (last == 0) doubleDataArray();
+		return stack[--last];
+	}
+
+	inline void N_memory_pool::release(void* s) {
+		stack[last++] = (uint8_t*)s;
+	}
+
+	inline N_memory_pool::N_memory_pool(N_memory_pool&& p) noexcept
+		: data(p.data), stack(p.stack), last(p.last), size(p.size), block_size(p.block_size) {
+		p.stack = nullptr;
+		p.data.clear();
+	}
+
+
+	inline void IN_pool::addDataBlockArray(uint32_t tot_size, uint32_t extended_block_size, uint32_t** fs) {
+		uint32_t* data_1 = (uint32_t*)malloc(sizeof(uint32_t) * tot_size);
+		data.push_back(data_1);
+		uint32_t* lst = data_1 + tot_size;
+		while (lst != data_1) {
+			lst -= extended_block_size;
+			*lst = block_size;
+			*fs++ = lst + 1;
+		}
+	}
+
+	inline void IN_pool::doubleDataArray() {
+		const uint32_t extended_block_size = block_size + 1;
+
+		uint32_t** fs = (uint32_t**)malloc(sizeof(uint32_t*) * size * 2);
+		for (uint32_t i = 0; i < size; i++) fs[i + size] = stack[i];
+		free(stack);
+		stack = fs;
+
+		addDataBlockArray(extended_block_size * size, extended_block_size, fs);
+
+		last += size;
+		size *= 2;
+	}
+
+	inline IN_pool::IN_pool(uint32_t _size, uint32_t _block_size) : last(_size), size(_size), block_size(_block_size) {
+		const uint32_t extended_block_size = block_size + 1;
+		stack = (uint32_t**)malloc(sizeof(uint32_t*) * size);
+		uint32_t** fs = stack;
+		addDataBlockArray(size * extended_block_size, extended_block_size, fs);
+	}
+
+
+	inline IN_pool::~IN_pool() {
+		free(stack);
+		for (uint32_t* p : data) free(p);
+		data.clear();
+	}
+
+	inline uint32_t* IN_pool::alloc() {
+		if (last == 0) doubleDataArray();
+		return stack[--last];
+	}
+
+	inline void IN_pool::release(uint32_t* s) {
+		stack[last++] = s;
+	}
+
+	inline uint32_t IN_pool::blockSize() const {
+		return block_size;
+	}
+
+	inline IN_pool::IN_pool(IN_pool&& p) noexcept
+		: data(p.data), stack(p.stack), last(p.last), size(p.size), block_size(p.block_size) {
+		p.stack = nullptr;
+		p.data.clear();
+	}
+
+
+	inline IN_pool& MultiPool::pickPoolFromSize(uint32_t bs) {
+		uint32_t cz = (uint32_t)nfg_count_lz(bs - 1);
+		cz = (cz == 32) ? (31) : (cz);
+		return IN_pools[31U - cz];
+	}
+
+	inline MultiPool::MultiPool(uint32_t _max_block_size, uint32_t init_capacity) : max_block_size(_max_block_size) {
+		uint32_t bs = 1;
+		while (bs < max_block_size) {
+			bs <<= 1;
+			IN_pools.push_back(IN_pool(init_capacity, bs));
+		}
+	}
+
+	inline void* MultiPool::alloc(uint32_t num_bytes) {
+		const uint32_t num_els = ((num_bytes + 3) >> 2);
+		if (num_els > max_block_size) {
+			uint32_t* ptr;
+			if ((ptr = (uint32_t*)malloc(sizeof(uint32_t) * (num_els + 1))) == NULL) return NULL;
+			ptr[0] = 0;
+			return ptr + 1;
 		}
 
-		pickPoolFromSize(v).release(((uint32_t*)s));
+		return pickPoolFromSize(num_els).alloc();
 	}
-}
+
+	inline void MultiPool::release(void* s) {
+		if (s) {
+			uint32_t* ps = (((uint32_t*)s) - 1);
+			const uint32_t v = *ps;
+			if (v == 0) {
+				free(ps);
+				return;
+			}
+
+			pickPoolFromSize(v).release(((uint32_t*)s));
+		}
+	}
 
 
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// FUNCTION IMPLEMENTATIONS - INTERVAL NUMBER
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
+	//
+	// FUNCTION IMPLEMENTATIONS - INTERVAL NUMBER
+	//
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #ifdef USE_SIMD_INSTRUCTIONS
-inline __m128d interval_number::zero() { return _mm_setzero_pd(); }
-inline __m128d interval_number::minus_one() { return _mm_set1_pd(-1.0); }
-inline __m128d interval_number::sign_low_mask() { return _mm_castsi128_pd(_mm_set_epi64x(LLONG_MIN, 0)); }
-inline __m128d interval_number::sign_high_mask() { return _mm_castsi128_pd(_mm_set_epi64x(0, LLONG_MIN)); }
-inline __m128d interval_number::sign_fabs_mask() { return _mm_castsi128_pd(_mm_set_epi64x(~LLONG_MIN, ~LLONG_MIN)); }
-inline __m128d interval_number::all_high_mask() { return _mm_castsi128_pd(_mm_set_epi64x(0, -1LL)); }
+	inline __m128d interval_number::zero() { return _mm_setzero_pd(); }
+	inline __m128d interval_number::minus_one() { return _mm_set1_pd(-1.0); }
+	inline __m128d interval_number::sign_low_mask() { return _mm_castsi128_pd(_mm_set_epi64x(LLONG_MIN, 0)); }
+	inline __m128d interval_number::sign_high_mask() { return _mm_castsi128_pd(_mm_set_epi64x(0, LLONG_MIN)); }
+	inline __m128d interval_number::sign_fabs_mask() { return _mm_castsi128_pd(_mm_set_epi64x(~LLONG_MIN, ~LLONG_MIN)); }
+	inline __m128d interval_number::all_high_mask() { return _mm_castsi128_pd(_mm_set_epi64x(0, -1LL)); }
 
-inline __m128d interval_number::getLowSwitched() const { return _mm_xor_pd(interval, sign_low_mask()); }
+	inline __m128d interval_number::getLowSwitched() const { return _mm_xor_pd(interval, sign_low_mask()); }
 
-inline interval_number::interval_number() { }
-inline interval_number::interval_number(const double a) : interval(_mm_set_pd(-a, a)) { }
-inline interval_number::interval_number(const double minf, const double sup) : interval(_mm_set_pd(minf, sup)) { }
-inline interval_number::interval_number(const __m128d& i) : interval(i) { }
-inline interval_number::interval_number(const interval_number& b) : interval(b.interval) { }
+	inline interval_number::interval_number() {}
+	inline interval_number::interval_number(const double a) : interval(_mm_set_pd(-a, a)) {}
+	inline interval_number::interval_number(const double minf, const double sup) : interval(_mm_set_pd(minf, sup)) {}
+	inline interval_number::interval_number(const __m128d& i) : interval(i) {}
+	inline interval_number::interval_number(const interval_number& b) : interval(b.interval) {}
 
-inline double interval_number::minus_inf() const { return _mm_cvtsd_f64(_mm_shuffle_pd(interval, interval, 1)); }
-inline double interval_number::inf() const { return -minus_inf(); }
-inline double interval_number::sup() const { return _mm_cvtsd_f64(interval); }
+	inline double interval_number::minus_inf() const { return _mm_cvtsd_f64(_mm_shuffle_pd(interval, interval, 1)); }
+	inline double interval_number::inf() const { return -minus_inf(); }
+	inline double interval_number::sup() const { return _mm_cvtsd_f64(interval); }
 
-inline const double* interval_number::getInterval() const { return (const double*)&interval; }
-inline interval_number& interval_number::operator=(const interval_number& b) { interval = b.interval; return *this; }
-inline interval_number interval_number::operator+(const interval_number& b) const { return interval_number(_mm_add_pd(interval, b.interval)); }
-inline interval_number interval_number::operator-(const interval_number& b) const { return interval_number(_mm_add_pd(interval, _mm_shuffle_pd(b.interval, b.interval, 1))); }
-inline interval_number interval_number::operator-() const { return interval_number(_mm_shuffle_pd(interval, interval, 1)); }
-inline interval_number interval_number::operator+(const double b) const { return interval_number(_mm_add_pd(interval, _mm_set_pd(-b, b))); }
-inline interval_number interval_number::operator-(const double b) const { return interval_number(_mm_sub_pd(interval, _mm_set_pd(-b, b))); }
-inline interval_number& interval_number::operator+=(const interval_number& b) { return operator=(*this + b); }
-inline interval_number& interval_number::operator-=(const interval_number& b) { return operator=(*this - b); }
-inline interval_number& interval_number::operator*=(const interval_number& b) { return operator=(*this * b); }
-inline interval_number& interval_number::operator/=(const interval_number& b) { return operator=(*this / b); }
-inline interval_number& interval_number::operator+=(const double b) { return operator=(*this + b); }
-inline interval_number& interval_number::operator-=(const double b) { return operator=(*this - b); }
-inline interval_number& interval_number::operator*=(const double b) { return operator=(*this * b); }
-inline interval_number& interval_number::operator/=(const double b) { return operator=(*this / b); }
-inline bool interval_number::operator<(const double b) const { return sup() < b; }
-inline bool interval_number::operator<=(const double b) const { return sup() <= b; }
-inline bool interval_number::operator>(const double b) const { return inf() > b; }
-inline bool interval_number::operator>=(const double b) const { return inf() >= b; }
-inline bool interval_number::operator==(const double b) const { return sup() == inf() && sup() == b; }
+	inline const double* interval_number::getInterval() const { return (const double*)&interval; }
+	inline interval_number& interval_number::operator=(const interval_number& b) { interval = b.interval; return *this; }
+	inline interval_number interval_number::operator+(const interval_number& b) const { return interval_number(_mm_add_pd(interval, b.interval)); }
+	inline interval_number interval_number::operator-(const interval_number& b) const { return interval_number(_mm_add_pd(interval, _mm_shuffle_pd(b.interval, b.interval, 1))); }
+	inline interval_number interval_number::operator-() const { return interval_number(_mm_shuffle_pd(interval, interval, 1)); }
+	inline interval_number interval_number::operator+(const double b) const { return interval_number(_mm_add_pd(interval, _mm_set_pd(-b, b))); }
+	inline interval_number interval_number::operator-(const double b) const { return interval_number(_mm_sub_pd(interval, _mm_set_pd(-b, b))); }
+	inline interval_number& interval_number::operator+=(const interval_number& b) { return operator=(*this + b); }
+	inline interval_number& interval_number::operator-=(const interval_number& b) { return operator=(*this - b); }
+	inline interval_number& interval_number::operator*=(const interval_number& b) { return operator=(*this * b); }
+	inline interval_number& interval_number::operator/=(const interval_number& b) { return operator=(*this / b); }
+	inline interval_number& interval_number::operator+=(const double b) { return operator=(*this + b); }
+	inline interval_number& interval_number::operator-=(const double b) { return operator=(*this - b); }
+	inline interval_number& interval_number::operator*=(const double b) { return operator=(*this * b); }
+	inline interval_number& interval_number::operator/=(const double b) { return operator=(*this / b); }
+	inline bool interval_number::operator<(const double b) const { return sup() < b; }
+	inline bool interval_number::operator<=(const double b) const { return sup() <= b; }
+	inline bool interval_number::operator>(const double b) const { return inf() > b; }
+	inline bool interval_number::operator>=(const double b) const { return inf() >= b; }
+	inline bool interval_number::operator==(const double b) const { return sup() == inf() && sup() == b; }
 
-inline void interval_number::negate() { interval = _mm_shuffle_pd(interval, interval, 1); }
+	inline void interval_number::negate() { interval = _mm_shuffle_pd(interval, interval, 1); }
 
-inline bool interval_number::isNegative() const { return _mm_comilt_sd(interval, zero()); }
-inline bool interval_number::isPositive() const { return _mm_comilt_sd(_mm_shuffle_pd(interval, interval, 1), zero()); }
-inline int interval_number::sign() const { return (isNegative()) ? (-1) : (1); } // Zero is not accounted for
+	inline bool interval_number::isNegative() const { return _mm_comilt_sd(interval, zero()); }
+	inline bool interval_number::isPositive() const { return _mm_comilt_sd(_mm_shuffle_pd(interval, interval, 1), zero()); }
+	inline int interval_number::sign() const { return (isNegative()) ? (-1) : (1); } // Zero is not accounted for
 
 
 #ifdef USE_AVX2_INSTRUCTIONS
-inline interval_number interval_number::operator*(const interval_number& b) const
-{
-	// This version exploits 256bit registers provided by AVX2 architectures
-	// to compute the product using the "naive" eight-multiplications method.
-	// The advantage wrt to the non-avx version is due to the absence of
-	// branches in the execution, which increses the processor's throughput.
+	inline interval_number interval_number::operator*(const interval_number& b) const
+	{
+		// This version exploits 256bit registers provided by AVX2 architectures
+		// to compute the product using the "naive" eight-multiplications method.
+		// The advantage wrt to the non-avx version is due to the absence of
+		// branches in the execution, which increses the processor's throughput.
 
-	// Fill i1 and i2 with two copies of 'this' and 'b' respectively
-	__m256d i1 = _mm256_setr_m128d(interval, interval);
-	__m256d i2 = _mm256_setr_m128d(b.interval, b.interval);
+		// Fill i1 and i2 with two copies of 'this' and 'b' respectively
+		__m256d i1 = _mm256_setr_m128d(interval, interval);
+		__m256d i2 = _mm256_setr_m128d(b.interval, b.interval);
 
-	// Swizzle and change sign appropriately to produce all the eight configs
-	__m256d x2 = _mm256_shuffle_pd(i1, i1, 0b0101);
-	__m256d x3 = _mm256_xor_pd(i2, _mm256_setr_pd(0.0, 0.0, -0.0, -0.0));
-	__m256d x4 = _mm256_xor_pd(i2, _mm256_setr_pd(-0.0, -0.0, 0.0, 0.0));
-	x3 = _mm256_mul_pd(i1, x3);
-	x2 = _mm256_mul_pd(x2, x4);
-	x3 = _mm256_max_pd(x3, x2);
-	x4 = _mm256_shuffle_pd(x3, x3, 0b0101);
-	x3 = _mm256_max_pd(x3, x4);
-	x3 = _mm256_permute4x64_pd(x3, 0b01001000);
+		// Swizzle and change sign appropriately to produce all the eight configs
+		__m256d x2 = _mm256_shuffle_pd(i1, i1, 0b0101);
+		__m256d x3 = _mm256_xor_pd(i2, _mm256_setr_pd(0.0, 0.0, -0.0, -0.0));
+		__m256d x4 = _mm256_xor_pd(i2, _mm256_setr_pd(-0.0, -0.0, 0.0, 0.0));
+		x3 = _mm256_mul_pd(i1, x3);
+		x2 = _mm256_mul_pd(x2, x4);
+		x3 = _mm256_max_pd(x3, x2);
+		x4 = _mm256_shuffle_pd(x3, x3, 0b0101);
+		x3 = _mm256_max_pd(x3, x4);
+		x3 = _mm256_permute4x64_pd(x3, 0b01001000);
 
-	// The first two vals of the 256 vector are the resulting product
-	return _mm256_castpd256_pd128(x3);
-}
+		// The first two vals of the 256 vector are the resulting product
+		return _mm256_castpd256_pd128(x3);
+	}
 
-inline interval_number interval_number::operator/(const interval_number& b) const
-{
-	if (!b.signIsReliable()) return NAN;
+	inline interval_number interval_number::operator/(const interval_number& b) const
+	{
+		if (!b.signIsReliable()) return NAN;
 
-	// This version exploits 256bit registers provided by AVX2 architectures
-	// to compute the product using the "naive" eight-multiplications method.
-	// The advantage wrt to the non-avx version is due to the absence of
-	// branches in the execution, which increses the processor's throughput.
+		// This version exploits 256bit registers provided by AVX2 architectures
+		// to compute the product using the "naive" eight-multiplications method.
+		// The advantage wrt to the non-avx version is due to the absence of
+		// branches in the execution, which increses the processor's throughput.
 
-	// Fill i1 and i2 with two copies of 'this' and 'b' respectively
-	__m256d i1 = _mm256_castpd128_pd256(interval);
-	i1 = _mm256_insertf128_pd(i1, interval, 1);
-	__m256d i2 = _mm256_castpd128_pd256(b.interval);
-	i2 = _mm256_insertf128_pd(i2, b.interval, 1);
+		// Fill i1 and i2 with two copies of 'this' and 'b' respectively
+		__m256d i1 = _mm256_castpd128_pd256(interval);
+		i1 = _mm256_insertf128_pd(i1, interval, 1);
+		__m256d i2 = _mm256_castpd128_pd256(b.interval);
+		i2 = _mm256_insertf128_pd(i2, b.interval, 1);
 
-	// Swizzle and change sign appropriately to produce all the eight configs
-	__m256d x2 = _mm256_shuffle_pd(i1, i1, 5);
-	__m256d x3 = _mm256_xor_pd(i2, _mm256_set_pd(-0.0, -0.0, 0.0, 0.0));
-	__m256d x4 = _mm256_xor_pd(i2, _mm256_set_pd(0.0, 0.0, -0.0, -0.0));
-	x3 = _mm256_div_pd(i1, x3);
-	x2 = _mm256_div_pd(x2, x4);
-	x3 = _mm256_max_pd(x3, x2);
-	x4 = _mm256_shuffle_pd(x3, x3, 5);
-	x3 = _mm256_max_pd(x3, x4);
-	x3 = _mm256_permute4x64_pd(x3, 72);
+		// Swizzle and change sign appropriately to produce all the eight configs
+		__m256d x2 = _mm256_shuffle_pd(i1, i1, 5);
+		__m256d x3 = _mm256_xor_pd(i2, _mm256_set_pd(-0.0, -0.0, 0.0, 0.0));
+		__m256d x4 = _mm256_xor_pd(i2, _mm256_set_pd(0.0, 0.0, -0.0, -0.0));
+		x3 = _mm256_div_pd(i1, x3);
+		x2 = _mm256_div_pd(x2, x4);
+		x3 = _mm256_max_pd(x3, x2);
+		x4 = _mm256_shuffle_pd(x3, x3, 5);
+		x3 = _mm256_max_pd(x3, x4);
+		x3 = _mm256_permute4x64_pd(x3, 72);
 
-	// The first two vals of the 256 vector are the resulting product
-	return _mm256_castpd256_pd128(x3);
-}
+		// The first two vals of the 256 vector are the resulting product
+		return _mm256_castpd256_pd128(x3);
+	}
 
-inline interval_number interval_number::fmadd(const interval_number& b, const interval_number& c) const
-{
-	// Fill i1 and i2 with two copies of 'this' and 'b' respectively
-	__m256d i1 = _mm256_castpd128_pd256(interval);
-	i1 = _mm256_insertf128_pd(i1, interval, 1);
-	__m256d i2 = _mm256_castpd128_pd256(b.interval);
-	i2 = _mm256_insertf128_pd(i2, b.interval, 1);
-	__m256d i3 = _mm256_castpd128_pd256(c.interval);
-	i3 = _mm256_permute4x64_pd(i3, 80);
+	inline interval_number interval_number::fmadd(const interval_number& b, const interval_number& c) const
+	{
+		// Fill i1 and i2 with two copies of 'this' and 'b' respectively
+		__m256d i1 = _mm256_castpd128_pd256(interval);
+		i1 = _mm256_insertf128_pd(i1, interval, 1);
+		__m256d i2 = _mm256_castpd128_pd256(b.interval);
+		i2 = _mm256_insertf128_pd(i2, b.interval, 1);
+		__m256d i3 = _mm256_castpd128_pd256(c.interval);
+		i3 = _mm256_permute4x64_pd(i3, 80);
 
-	// Swizzle and change sign appropriately to produce all the eight configs
-	__m256d x2 = _mm256_shuffle_pd(i1, i1, 5);
-	__m256d x3 = _mm256_xor_pd(i2, _mm256_set_pd(-0.0, -0.0, 0.0, 0.0));
-	__m256d x4 = _mm256_xor_pd(i2, _mm256_set_pd(0.0, 0.0, -0.0, -0.0));
-	x3 = _mm256_fmadd_pd(i1, x3, i3);
-	x2 = _mm256_fmadd_pd(x2, x4, i3);
-	x3 = _mm256_max_pd(x3, x2);
-	x4 = _mm256_shuffle_pd(x3, x3, 5);
-	x3 = _mm256_max_pd(x3, x4);
-	x3 = _mm256_permute4x64_pd(x3, 72);
+		// Swizzle and change sign appropriately to produce all the eight configs
+		__m256d x2 = _mm256_shuffle_pd(i1, i1, 5);
+		__m256d x3 = _mm256_xor_pd(i2, _mm256_set_pd(-0.0, -0.0, 0.0, 0.0));
+		__m256d x4 = _mm256_xor_pd(i2, _mm256_set_pd(0.0, 0.0, -0.0, -0.0));
+		x3 = _mm256_fmadd_pd(i1, x3, i3);
+		x2 = _mm256_fmadd_pd(x2, x4, i3);
+		x3 = _mm256_max_pd(x3, x2);
+		x4 = _mm256_shuffle_pd(x3, x3, 5);
+		x3 = _mm256_max_pd(x3, x4);
+		x3 = _mm256_permute4x64_pd(x3, 72);
 
-	// The first two vals of the 256 vector are the resulting product
-	return _mm256_castpd256_pd128(x3);
-}
+		// The first two vals of the 256 vector are the resulting product
+		return _mm256_castpd256_pd128(x3);
+	}
 
-inline interval_number interval_number::fmsub(const interval_number& b, const interval_number& c) const
-{
-	// a.fmsub(b, c) is a*b - c, hence the third addend must be the ADDITIVE
-	// inverse of c. inverse() is the multiplicative one (the reciprocal 1/x,
-	// see below), so it used to compute a*b + 1/c; it also raised a division
-	// by zero whenever c contained zero. operator-() is just a swap of the
-	// two lanes: exact, and it never signals.
-	return fmadd(b, -c);
-}
+	inline interval_number interval_number::fmsub(const interval_number& b, const interval_number& c) const
+	{
+		// a.fmsub(b, c) is a*b - c, hence the third addend must be the ADDITIVE
+		// inverse of c. inverse() is the multiplicative one (the reciprocal 1/x,
+		// see below), so it used to compute a*b + 1/c; it also raised a division
+		// by zero whenever c contained zero. operator-() is just a swap of the
+		// two lanes: exact, and it never signals.
+		return fmadd(b, -c);
+	}
 
 #else
-inline interval_number interval_number::operator*(const interval_number& b) const
-{
-	// <a0,a1> * <b0,b1>
-	__m128d ssg;
-	__m128d llhh, lhhl, ip;
-
-	// cfg	(min_low, high)		(low, high)
-	// 0	++ ++				-+ -+
-	// 1	++ +-				-+ --
-	// 2	++ -+				++ -+
-	// 4	+- ++				-- -+
-	// 5	+- +-				-- --
-	// 6	+- -+				-- ++
-	// 8	-+ ++				++ -+
-	// 9	-+ +-				++ --
-	// 10	-+ -+				++ ++
-
-	switch ((_mm_movemask_pd(interval) << 2) | _mm_movemask_pd(b.interval))
+	inline interval_number interval_number::operator*(const interval_number& b) const
 	{
-	case 0: // -+ * -+: <min(<a0*b1>,<a1*b0>), max(<a0*b0>,<a1*b1>)>
-		llhh = _mm_mul_pd(interval, b.interval);
-		lhhl = _mm_mul_pd(interval, _mm_shuffle_pd(b.interval, b.interval, 1));
-		return interval_number(_mm_max_pd(_mm_unpacklo_pd(llhh, lhhl), _mm_unpackhi_pd(llhh, lhhl)));
-	case 1: // -+ * --: <b0*a1, b0*a0>
-		return interval_number(_mm_mul_pd(_mm_shuffle_pd(b.interval, b.interval, 3), _mm_shuffle_pd(interval, interval, 1)));
-	case 2: // -+ * ++: <b1*a0, b1*a1>
-		return interval_number(_mm_mul_pd(_mm_shuffle_pd(b.interval, b.interval, 0), interval));
-	case 4: // -- * -+: <a0*b1, a0*b0>
-		return interval_number(_mm_mul_pd(_mm_shuffle_pd(interval, interval, 3), _mm_shuffle_pd(b.interval, b.interval, 1)));
-	case 5: // -- * --: <a1*b1, a0*b0>
-		ip = _mm_mul_pd(_mm_xor_pd(interval, sign_high_mask()), b.interval);
-		return interval_number(_mm_shuffle_pd(ip, ip, 1));
-	case 6: // -- * ++: <a0*b1, a1*b0>
-		ssg = _mm_xor_pd(b.interval, sign_low_mask());
-		return interval_number(_mm_mul_pd(interval, _mm_shuffle_pd(ssg, ssg, 1)));
-	case 8: // ++ * -+: <a1*b0, a1*b1>
-		return interval_number(_mm_mul_pd(_mm_shuffle_pd(interval, interval, 0), b.interval));
-	case 9: // ++ * --: <b0*a1, b1*a0>
-		ssg = _mm_xor_pd(interval, sign_low_mask());
-		return interval_number(_mm_mul_pd(b.interval, _mm_shuffle_pd(ssg, ssg, 1)));
-	case 10: // ++ * ++: <a0*b0, a1*b1>
-		return interval_number(_mm_mul_pd(interval, _mm_xor_pd(b.interval, sign_low_mask())));
+		// <a0,a1> * <b0,b1>
+		__m128d ssg;
+		__m128d llhh, lhhl, ip;
+
+		// cfg	(min_low, high)		(low, high)
+		// 0	++ ++				-+ -+
+		// 1	++ +-				-+ --
+		// 2	++ -+				++ -+
+		// 4	+- ++				-- -+
+		// 5	+- +-				-- --
+		// 6	+- -+				-- ++
+		// 8	-+ ++				++ -+
+		// 9	-+ +-				++ --
+		// 10	-+ -+				++ ++
+
+		switch ((_mm_movemask_pd(interval) << 2) | _mm_movemask_pd(b.interval))
+		{
+		case 0: // -+ * -+: <min(<a0*b1>,<a1*b0>), max(<a0*b0>,<a1*b1>)>
+			llhh = _mm_mul_pd(interval, b.interval);
+			lhhl = _mm_mul_pd(interval, _mm_shuffle_pd(b.interval, b.interval, 1));
+			return interval_number(_mm_max_pd(_mm_unpacklo_pd(llhh, lhhl), _mm_unpackhi_pd(llhh, lhhl)));
+		case 1: // -+ * --: <b0*a1, b0*a0>
+			return interval_number(_mm_mul_pd(_mm_shuffle_pd(b.interval, b.interval, 3), _mm_shuffle_pd(interval, interval, 1)));
+		case 2: // -+ * ++: <b1*a0, b1*a1>
+			return interval_number(_mm_mul_pd(_mm_shuffle_pd(b.interval, b.interval, 0), interval));
+		case 4: // -- * -+: <a0*b1, a0*b0>
+			return interval_number(_mm_mul_pd(_mm_shuffle_pd(interval, interval, 3), _mm_shuffle_pd(b.interval, b.interval, 1)));
+		case 5: // -- * --: <a1*b1, a0*b0>
+			ip = _mm_mul_pd(_mm_xor_pd(interval, sign_high_mask()), b.interval);
+			return interval_number(_mm_shuffle_pd(ip, ip, 1));
+		case 6: // -- * ++: <a0*b1, a1*b0>
+			ssg = _mm_xor_pd(b.interval, sign_low_mask());
+			return interval_number(_mm_mul_pd(interval, _mm_shuffle_pd(ssg, ssg, 1)));
+		case 8: // ++ * -+: <a1*b0, a1*b1>
+			return interval_number(_mm_mul_pd(_mm_shuffle_pd(interval, interval, 0), b.interval));
+		case 9: // ++ * --: <b0*a1, b1*a0>
+			ssg = _mm_xor_pd(interval, sign_low_mask());
+			return interval_number(_mm_mul_pd(b.interval, _mm_shuffle_pd(ssg, ssg, 1)));
+		case 10: // ++ * ++: <a0*b0, a1*b1>
+			return interval_number(_mm_mul_pd(interval, _mm_xor_pd(b.interval, sign_low_mask())));
+		}
+
+		return interval_number(NAN);
 	}
 
-	return interval_number(NAN);
-}
-
-inline interval_number interval_number::operator/(const interval_number& b) const
-{
-	if (!b.signIsReliable()) return NAN;
-
-	// <a0,a1> * <b0,b1>
-
-	// cfg	(min_low, high)		(low, high)
-	// 1	++ +-				-+ --
-	// 5	+- +-				-- --
-	// 6	+- -+				-- ++
-	// 9	-+ +-				++ --
-	// 10	-+ -+				++ ++
-
-	// In the SIMD build the 'interval' register is packed as
-	// [high, min_low] (lane0=high=hi, lane1=min_low=-lo). Every case is
-	// resolved by a SINGLE _mm_div_pd(N, D) with both lanes rounded
-	// towards +inf (FE_UPWARD): lane0 yields hi_r (rounded outwards, up)
-	// and lane1 yields min_low_r=-lo_r (which rounds lo_r outwards, down).
-	// The formulas match the ones verified on the scalar path. Actual
-	// configurations (b has a reliable sign, hence it excludes zero):
-	switch ((_mm_movemask_pd(interval) << 2) | _mm_movemask_pd(b.interval))
+	inline interval_number interval_number::operator/(const interval_number& b) const
 	{
-	case 1: // a contains 0, b<0: lo_r=hi/hb, hi_r=lo/hb -> N=[lo,-hi], D=[hb,hb]
-		return interval_number(_mm_div_pd(_mm_xor_pd(_mm_shuffle_pd(interval, interval, 1), _mm_set1_pd(-0.0)), _mm_shuffle_pd(b.interval, b.interval, 0)));
-	case 2: // a contains 0, b>0: lo_r=lo/lb, hi_r=hi/lb -> N=interval, D=[lb,lb]
-		return interval_number(_mm_div_pd(interval, _mm_xor_pd(_mm_shuffle_pd(b.interval, b.interval, 3), _mm_set1_pd(-0.0))));
-	case 5: // a<0, b<0
-		return interval_number(_mm_div_pd(_mm_xor_pd(_mm_shuffle_pd(interval, interval, 1), sign_high_mask()), b.interval));
-	case 6: // a<0, b>0
-		return interval_number(_mm_div_pd(interval, _mm_xor_pd(b.interval, sign_low_mask())));
-	case 9: // a>0, b<0
-		return interval_number(_mm_div_pd(_mm_xor_pd(_mm_shuffle_pd(interval, interval, 1), sign_low_mask()), _mm_shuffle_pd(b.interval, b.interval, 1)));
-	case 10: // a>0, b>0
-		return interval_number(_mm_div_pd(interval, _mm_xor_pd(_mm_shuffle_pd(b.interval, b.interval, 1), sign_high_mask())));
-	}
+		if (!b.signIsReliable()) return NAN;
 
-	return interval_number(NAN);
-}
+		// <a0,a1> * <b0,b1>
+
+		// cfg	(min_low, high)		(low, high)
+		// 1	++ +-				-+ --
+		// 5	+- +-				-- --
+		// 6	+- -+				-- ++
+		// 9	-+ +-				++ --
+		// 10	-+ -+				++ ++
+
+		// In the SIMD build the 'interval' register is packed as
+		// [high, min_low] (lane0=high=hi, lane1=min_low=-lo). Every case is
+		// resolved by a SINGLE _mm_div_pd(N, D) with both lanes rounded
+		// towards +inf (FE_UPWARD): lane0 yields hi_r (rounded outwards, up)
+		// and lane1 yields min_low_r=-lo_r (which rounds lo_r outwards, down).
+		// The formulas match the ones verified on the scalar path. Actual
+		// configurations (b has a reliable sign, hence it excludes zero):
+		switch ((_mm_movemask_pd(interval) << 2) | _mm_movemask_pd(b.interval))
+		{
+		case 1: // a contains 0, b<0: lo_r=hi/hb, hi_r=lo/hb -> N=[lo,-hi], D=[hb,hb]
+			return interval_number(_mm_div_pd(_mm_xor_pd(_mm_shuffle_pd(interval, interval, 1), _mm_set1_pd(-0.0)), _mm_shuffle_pd(b.interval, b.interval, 0)));
+		case 2: // a contains 0, b>0: lo_r=lo/lb, hi_r=hi/lb -> N=interval, D=[lb,lb]
+			return interval_number(_mm_div_pd(interval, _mm_xor_pd(_mm_shuffle_pd(b.interval, b.interval, 3), _mm_set1_pd(-0.0))));
+		case 5: // a<0, b<0
+			return interval_number(_mm_div_pd(_mm_xor_pd(_mm_shuffle_pd(interval, interval, 1), sign_high_mask()), b.interval));
+		case 6: // a<0, b>0
+			return interval_number(_mm_div_pd(interval, _mm_xor_pd(b.interval, sign_low_mask())));
+		case 9: // a>0, b<0
+			return interval_number(_mm_div_pd(_mm_xor_pd(_mm_shuffle_pd(interval, interval, 1), sign_low_mask()), _mm_shuffle_pd(b.interval, b.interval, 1)));
+		case 10: // a>0, b>0
+			return interval_number(_mm_div_pd(interval, _mm_xor_pd(_mm_shuffle_pd(b.interval, b.interval, 1), sign_high_mask())));
+		}
+
+		return interval_number(NAN);
+	}
 
 #endif
 
-inline interval_number interval_number::operator*(const double b) const {
-	if (b >= 0) return interval_number(_mm_mul_pd(interval, _mm_set1_pd(b)));
-	else return interval_number(_mm_mul_pd(_mm_shuffle_pd(interval, interval, 1), _mm_set1_pd(-b)));
-}
-
-inline interval_number interval_number::operator/(const double b) const {
-	if (b >= 0) return interval_number(_mm_div_pd(interval, _mm_set1_pd(b)));
-	else return interval_number(_mm_div_pd(_mm_shuffle_pd(interval, interval, 1), _mm_set1_pd(-b)));
-}
-
-inline interval_number interval_number::abs() const {
-	switch (_mm_movemask_pd(interval))
-	{
-	case 0: // Hi>0, Lo<0
-		return _mm_and_pd(_mm_max_pd(interval, _mm_shuffle_pd(interval, interval, 1)), all_high_mask());
-	case 1: // Hi<0, Lo<0
-		return _mm_shuffle_pd(interval, interval, 1);
+	inline interval_number interval_number::operator*(const double b) const {
+		if (b >= 0) return interval_number(_mm_mul_pd(interval, _mm_set1_pd(b)));
+		else return interval_number(_mm_mul_pd(_mm_shuffle_pd(interval, interval, 1), _mm_set1_pd(-b)));
 	}
-	return *this; // If Hi>0, Lo>0 OR invalid interval == case 3 above
-}
 
-inline interval_number interval_number::sqr() const {
-	const interval_number av = abs();
-	return interval_number(_mm_mul_pd(av.getLowSwitched(), av.interval));
-}
-
-inline interval_number min(const interval_number& a, const interval_number& b) {
-	const __m128d ai = a.getLowSwitched(), bi = b.getLowSwitched();
-	const __m128d m = _mm_min_pd(ai, bi);
-	return interval_number(m).getLowSwitched();
-}
-
-inline interval_number max(const interval_number& a, const interval_number& b) {
-	const __m128d ai = a.getLowSwitched(), bi = b.getLowSwitched();
-	const __m128d m = _mm_max_pd(ai, bi);
-	return interval_number(m).getLowSwitched();
-}
-
-inline interval_number interval_number::inverse() const
-{
-	const int m = _mm_movemask_pd(interval);
-	if (m == 1 || m == 2)
-	{
-		const __m128d den = _mm_shuffle_pd(interval, interval, 1);
-		const __m128d frac = _mm_div_pd(minus_one(), den);
-		return interval_number(frac);
+	inline interval_number interval_number::operator/(const double b) const {
+		if (b >= 0) return interval_number(_mm_div_pd(interval, _mm_set1_pd(b)));
+		else return interval_number(_mm_div_pd(_mm_shuffle_pd(interval, interval, 1), _mm_set1_pd(-b)));
 	}
-	else
-	{
-		return interval_number(NAN);
+
+	inline interval_number interval_number::abs() const {
+		switch (_mm_movemask_pd(interval))
+		{
+		case 0: // Hi>0, Lo<0
+			return _mm_and_pd(_mm_max_pd(interval, _mm_shuffle_pd(interval, interval, 1)), all_high_mask());
+		case 1: // Hi<0, Lo<0
+			return _mm_shuffle_pd(interval, interval, 1);
+		}
+		return *this; // If Hi>0, Lo>0 OR invalid interval == case 3 above
 	}
-}
 
-inline interval_number interval_number::invmul(const double b) const
-{
-	const int m = _mm_movemask_pd(interval);
-	if (m != 1 && m != 2) return interval_number(NAN);
-	if (b > 0) return interval_number(_mm_div_pd(_mm_set1_pd(-b), _mm_shuffle_pd(interval, interval, 1)));
-	else return interval_number(_mm_div_pd(_mm_set1_pd(b), interval));
-}
+	inline interval_number interval_number::sqr() const {
+		const interval_number av = abs();
+		return interval_number(_mm_mul_pd(av.getLowSwitched(), av.interval));
+	}
 
-inline interval_number interval_number::pow(unsigned int e) const {
-	if (e == 0) return interval_number(1.0);
+	inline interval_number min(const interval_number& a, const interval_number& b) {
+		const __m128d ai = a.getLowSwitched(), bi = b.getLowSwitched();
+		const __m128d m = _mm_min_pd(ai, bi);
+		return interval_number(m).getLowSwitched();
+	}
 
-	__m128d uns = _mm_and_pd(interval, sign_fabs_mask());
-	__m128d ui = interval;
+	inline interval_number max(const interval_number& a, const interval_number& b) {
+		const __m128d ai = a.getLowSwitched(), bi = b.getLowSwitched();
+		const __m128d m = _mm_max_pd(ai, bi);
+		return interval_number(m).getLowSwitched();
+	}
 
-	if (!(e & (unsigned int)1)) { // e is even
-		const int s = _mm_movemask_pd(interval);
-		if (s == 0) {
-			__m128d swapped = _mm_shuffle_pd(uns, uns, 1);
-			if (_mm_comigt_sd(swapped, uns)) {
-				ui = _mm_shuffle_pd(uns, uns, 1);
-				uns = swapped;
+	inline interval_number interval_number::inverse() const
+	{
+		const int m = _mm_movemask_pd(interval);
+		if (m == 1 || m == 2)
+		{
+			const __m128d den = _mm_shuffle_pd(interval, interval, 1);
+			const __m128d frac = _mm_div_pd(minus_one(), den);
+			return interval_number(frac);
+		}
+		else
+		{
+			return interval_number(NAN);
+		}
+	}
+
+	inline interval_number interval_number::invmul(const double b) const
+	{
+		const int m = _mm_movemask_pd(interval);
+		if (m != 1 && m != 2) return interval_number(NAN);
+		if (b > 0) return interval_number(_mm_div_pd(_mm_set1_pd(-b), _mm_shuffle_pd(interval, interval, 1)));
+		else return interval_number(_mm_div_pd(_mm_set1_pd(b), interval));
+	}
+
+	inline interval_number interval_number::pow(unsigned int e) const {
+		if (e == 0) return interval_number(1.0);
+
+		__m128d uns = _mm_and_pd(interval, sign_fabs_mask());
+		__m128d ui = interval;
+
+		if (!(e & (unsigned int)1)) { // e is even
+			const int s = _mm_movemask_pd(interval);
+			if (s == 0) {
+				__m128d swapped = _mm_shuffle_pd(uns, uns, 1);
+				if (_mm_comigt_sd(swapped, uns)) {
+					ui = _mm_shuffle_pd(uns, uns, 1);
+					uns = swapped;
+				}
+				uns = _mm_and_pd(uns, all_high_mask());
 			}
-			uns = _mm_and_pd(uns, all_high_mask());
+			else if (s == 1) {
+				ui = _mm_shuffle_pd(ui, ui, 1);
+				uns = _mm_shuffle_pd(uns, uns, 1);
+			}
 		}
-		else if (s == 1) {
-			ui = _mm_shuffle_pd(ui, ui, 1);
-			uns = _mm_shuffle_pd(uns, uns, 1);
-		}
+
+		while (--e) ui = _mm_mul_pd(ui, uns);
+		return interval_number(ui);
 	}
 
-	while (--e) ui = _mm_mul_pd(ui, uns);
-	return interval_number(ui);
-}
 
+	inline interval_number interval_number::pow2() const {
+		return sqr();
+	}
 
-inline interval_number interval_number::pow2() const {
-	return sqr();
-}
-
-inline interval_number interval_number::pow3() const {
-	// Accumulate keeping the sign fixed, as pow() does for odd exponents:
-	// each lane is multiplied by the MAGNITUDE of the other endpoint, so
-	// the rounding error always grows the interval outwards. Multiplying
-	// the signed lanes directly (x*x*x) flips the sign at the second
-	// product, turning the over-estimated square into an under-estimated
-	// cube: the resulting lower endpoint ends up 1-2 ulp ABOVE the true
-	// cube and the interval no longer contains it.
-	// Note the association: ((v*|v|)*|v|), not (v*(|v|*|v|)).
-	const __m128d uns = _mm_and_pd(interval, sign_fabs_mask());
-	__m128d ui = _mm_mul_pd(interval, uns);
-	ui = _mm_mul_pd(ui, uns);
-	return interval_number(ui);
-}
+	inline interval_number interval_number::pow3() const {
+		// Accumulate keeping the sign fixed, as pow() does for odd exponents:
+		// each lane is multiplied by the MAGNITUDE of the other endpoint, so
+		// the rounding error always grows the interval outwards. Multiplying
+		// the signed lanes directly (x*x*x) flips the sign at the second
+		// product, turning the over-estimated square into an under-estimated
+		// cube: the resulting lower endpoint ends up 1-2 ulp ABOVE the true
+		// cube and the interval no longer contains it.
+		// Note the association: ((v*|v|)*|v|), not (v*(|v|*|v|)).
+		const __m128d uns = _mm_and_pd(interval, sign_fabs_mask());
+		__m128d ui = _mm_mul_pd(interval, uns);
+		ui = _mm_mul_pd(ui, uns);
+		return interval_number(ui);
+	}
 
 #else // USE_SIMD_INSTRUCTIONS
 
-inline const double* interval_number::getInterval() const { return (const double*)&min_low; }
+	inline const double* interval_number::getInterval() const { return (const double*)&min_low; }
 
-inline interval_number::interval_number() { }
-inline interval_number::interval_number(double a) : min_low(-a), high(a) {}
-inline interval_number::interval_number(double minf, double sup) : min_low(minf), high(sup) {}
-inline interval_number::interval_number(const interval_number& b) : min_low(b.min_low), high(b.high) {}
+	inline interval_number::interval_number() {}
+	inline interval_number::interval_number(double a) : min_low(-a), high(a) {}
+	inline interval_number::interval_number(double minf, double sup) : min_low(minf), high(sup) {}
+	inline interval_number::interval_number(const interval_number& b) : min_low(b.min_low), high(b.high) {}
 
-inline double interval_number::minus_inf() const { return min_low; }
-inline double interval_number::inf() const { return -min_low; }
-inline double interval_number::sup() const { return high; }
+	inline double interval_number::minus_inf() const { return min_low; }
+	inline double interval_number::inf() const { return -min_low; }
+	inline double interval_number::sup() const { return high; }
 
-inline bool interval_number::isNegative() const { return (high < 0); }
-inline bool interval_number::isPositive() const { return (min_low < 0); }
-inline void interval_number::negate() { std::swap(min_low, high); }
+	inline bool interval_number::isNegative() const { return (high < 0); }
+	inline bool interval_number::isPositive() const { return (min_low < 0); }
+	inline void interval_number::negate() { std::swap(min_low, high); }
 
-inline bool interval_number::operator<(const double b) const { return (high < b); }
-inline bool interval_number::operator<=(const double b) const { return (high <= b); }
+	inline bool interval_number::operator<(const double b) const { return (high < b); }
+	inline bool interval_number::operator<=(const double b) const { return (high <= b); }
 
-inline interval_number& interval_number::operator=(const interval_number& b) { min_low = b.min_low; high = b.high; return *this; }
+	inline interval_number& interval_number::operator=(const interval_number& b) { min_low = b.min_low; high = b.high; return *this; }
 
-inline interval_number interval_number::operator+(const interval_number& b) const { return interval_number(min_low + b.min_low, high + b.high); }
+	inline interval_number interval_number::operator+(const interval_number& b) const { return interval_number(min_low + b.min_low, high + b.high); }
 
-inline interval_number interval_number::operator-(const interval_number& b) const { return interval_number(b.high + min_low, high + b.min_low); }
+	inline interval_number interval_number::operator-(const interval_number& b) const { return interval_number(b.high + min_low, high + b.min_low); }
 
-inline interval_number interval_number::operator-() const { return interval_number(high, min_low); }
-inline interval_number interval_number::operator+(const double b) const { return interval_number(min_low - b, high + b); }
-inline interval_number interval_number::operator-(const double b) const { return interval_number(min_low + b, high - b); }
+	inline interval_number interval_number::operator-() const { return interval_number(high, min_low); }
+	inline interval_number interval_number::operator+(const double b) const { return interval_number(min_low - b, high + b); }
+	inline interval_number interval_number::operator-(const double b) const { return interval_number(min_low + b, high - b); }
 
-inline interval_number& interval_number::operator+=(const interval_number& b) { min_low += b.min_low; high += b.high; return *this; }
-inline interval_number& interval_number::operator-=(const interval_number& b) { return operator=(*this - b); }
-inline interval_number& interval_number::operator*=(const interval_number& b) { return operator=(*this * b); }
-inline interval_number& interval_number::operator/=(const interval_number& b) { return operator=(*this / b); }
-inline interval_number& interval_number::operator+=(const double b) { min_low -= b; high += b; return *this; }
-inline interval_number& interval_number::operator-=(const double b) { min_low += b; high -= b; return *this; }
-inline interval_number& interval_number::operator*=(const double b) { return operator=(*this * b); }
-inline interval_number& interval_number::operator/=(const double b) { return operator=(*this / b); }
+	inline interval_number& interval_number::operator+=(const interval_number& b) { min_low += b.min_low; high += b.high; return *this; }
+	inline interval_number& interval_number::operator-=(const interval_number& b) { return operator=(*this - b); }
+	inline interval_number& interval_number::operator*=(const interval_number& b) { return operator=(*this * b); }
+	inline interval_number& interval_number::operator/=(const interval_number& b) { return operator=(*this / b); }
+	inline interval_number& interval_number::operator+=(const double b) { min_low -= b; high += b; return *this; }
+	inline interval_number& interval_number::operator-=(const double b) { min_low += b; high -= b; return *this; }
+	inline interval_number& interval_number::operator*=(const double b) { return operator=(*this * b); }
+	inline interval_number& interval_number::operator/=(const double b) { return operator=(*this / b); }
 
-inline interval_number min(const interval_number& a, const interval_number& b) {
-	return interval_number(std::max(a.min_low, b.min_low), std::min(a.high, b.high));
-}
-
-inline interval_number max(const interval_number& a, const interval_number& b) {
-	return interval_number(std::min(a.min_low, b.min_low), std::max(a.high, b.high));
-}
-
-inline bool interval_number::operator>(const double b) const { return (min_low < -b); }
-inline bool interval_number::operator>=(const double b) const { return (min_low <= -b); }
-inline bool interval_number::operator==(const double b) const { return (high == b && min_low == -b); }
-
-inline int interval_number::sign() const { return (isNegative()) ? (-1) : (1); } // Zero is not accounted for
-
-inline interval_number interval_number::operator*(const interval_number& b) const
-{
-	typedef union error_approx_type_t
-	{
-		double d;
-		uint64_t u;
-
-		inline error_approx_type_t() {}
-		inline error_approx_type_t(double a) : d(a) {}
-		inline uint64_t is_negative() const { return u >> 63; }
-	} casted_double;
-
-	casted_double l1(min_low), h1(high), l2(b.min_low), h2(b.high);
-	uint64_t cfg = (l1.is_negative() << 3) + (h1.is_negative() << 2) + (l2.is_negative() << 1) + (h2.is_negative());
-
-	// cfg	(min_low, high)		(low, high)
-	// 0	++ ++				-+ -+
-	// 1	++ +-				-+ --
-	// 2	++ -+				-+ ++
-	// 4	+- ++				-- -+
-	// 5	+- +-				-- --
-	// 6	+- -+				-- ++
-	// 8	-+ ++				++ -+
-	// 9	-+ +-				++ --
-	// 10	-+ -+				++ ++
-	switch (cfg)
-	{
-	case 10: return interval_number(min_low * (-b.min_low), high * b.high);
-	case 8: return interval_number(high * b.min_low, high * b.high);
-	case 9: return interval_number(high * b.min_low, (-min_low) * b.high);
-	case 2: return interval_number(min_low * b.high, high * b.high);
-	case 0:
-		double ll, lh, hl, hh;
-		ll = min_low * b.min_low; lh = (min_low * b.high); hl = (high * b.min_low); hh = high * b.high;
-		if (hl > lh) lh = hl;
-		if (ll > hh) hh = ll;
-		return interval_number(lh, hh);
-	case 1: return interval_number(high * b.min_low, min_low * b.min_low);
-	case 6: return interval_number(min_low * b.high, high * (-b.min_low));
-	case 4: return interval_number(min_low * b.high, min_low * b.min_low);
-	case 5: return interval_number((-high) * b.high, min_low * b.min_low);
-	};
-
-	return interval_number(NAN);
-}
-
-inline interval_number interval_number::operator/(const interval_number& b) const
-{
-	if (!b.signIsReliable()) return NAN;
-
-	typedef union error_approx_type_t
-	{
-		double d;
-		uint64_t u;
-
-		inline error_approx_type_t() {}
-		inline error_approx_type_t(double a) : d(a) {}
-		inline uint64_t is_negative() const { return u >> 63; }
-	} casted_double;
-
-	casted_double l1(min_low), h1(high), l2(b.min_low), h2(b.high);
-	uint64_t cfg = (l1.is_negative() << 3) + (h1.is_negative() << 2) + (l2.is_negative() << 1) + (h2.is_negative());
-
-	// cfg	(min_low, high)		(low, high)
-	// 1	++ +-				-+ --
-	// 5	+- +-				-- --
-	// 6	+- -+				-- ++
-	// 9	-+ +-				++ --
-	// 10	-+ -+				++ ++
-	switch (cfg)
-	{
-	case 10: return interval_number(min_low / b.high, high / (-b.min_low));
-	case 9: return interval_number((-high) / b.high, min_low / b.min_low);
-	case 2: return interval_number(min_low / (-b.min_low), high / (-b.min_low));
-	case 1: return interval_number((-high) / b.high, (-min_low) / b.high);
-	case 6: return interval_number(min_low / (-b.min_low), high / b.high);
-	case 5: return interval_number(high / b.min_low, (-min_low) / b.high);
-	};
-
-	return interval_number(NAN);
-}
-
-inline interval_number interval_number::operator*(const double b) const
-{
-	if (b >= 0) return interval_number(min_low * b, high * b);
-	else return interval_number(high * (-b), min_low * (-b));
-}
-
-inline interval_number interval_number::operator/(const double b) const
-{
-	if (b >= 0) return interval_number(min_low / b, high / b);
-	else return interval_number(high / (-b), min_low / (-b));
-}
-
-inline interval_number interval_number::abs() const {
-	if (min_low < 0) return *this;
-	if (high < 0) return interval_number(high, min_low);
-	return interval_number(0, std::max(high, min_low));
-}
-
-inline interval_number interval_number::sqr() const {
-	if (min_low < 0) return interval_number(-min_low * min_low, high * high);
-	if (high < 0) return interval_number(-high * high, min_low * min_low);
-	if (min_low < high) return interval_number(0, high * high);
-	return interval_number(0, min_low * min_low);
-}
-
-inline interval_number interval_number::inverse() const
-{
-	if ((min_low < 0 && high>0) || (min_low > 0 && high < 0))
-	{
-		return interval_number(-1.0 / high, -1.0 / min_low);
+	inline interval_number min(const interval_number& a, const interval_number& b) {
+		return interval_number(std::max(a.min_low, b.min_low), std::min(a.high, b.high));
 	}
-	else
+
+	inline interval_number max(const interval_number& a, const interval_number& b) {
+		return interval_number(std::min(a.min_low, b.min_low), std::max(a.high, b.high));
+	}
+
+	inline bool interval_number::operator>(const double b) const { return (min_low < -b); }
+	inline bool interval_number::operator>=(const double b) const { return (min_low <= -b); }
+	inline bool interval_number::operator==(const double b) const { return (high == b && min_low == -b); }
+
+	inline int interval_number::sign() const { return (isNegative()) ? (-1) : (1); } // Zero is not accounted for
+
+	inline interval_number interval_number::operator*(const interval_number& b) const
 	{
+		typedef union error_approx_type_t
+		{
+			double d;
+			uint64_t u;
+
+			inline error_approx_type_t() {}
+			inline error_approx_type_t(double a) : d(a) {}
+			inline uint64_t is_negative() const { return u >> 63; }
+		} casted_double;
+
+		casted_double l1(min_low), h1(high), l2(b.min_low), h2(b.high);
+		uint64_t cfg = (l1.is_negative() << 3) + (h1.is_negative() << 2) + (l2.is_negative() << 1) + (h2.is_negative());
+
+		// cfg	(min_low, high)		(low, high)
+		// 0	++ ++				-+ -+
+		// 1	++ +-				-+ --
+		// 2	++ -+				-+ ++
+		// 4	+- ++				-- -+
+		// 5	+- +-				-- --
+		// 6	+- -+				-- ++
+		// 8	-+ ++				++ -+
+		// 9	-+ +-				++ --
+		// 10	-+ -+				++ ++
+		switch (cfg)
+		{
+		case 10: return interval_number(min_low * (-b.min_low), high * b.high);
+		case 8: return interval_number(high * b.min_low, high * b.high);
+		case 9: return interval_number(high * b.min_low, (-min_low) * b.high);
+		case 2: return interval_number(min_low * b.high, high * b.high);
+		case 0:
+			double ll, lh, hl, hh;
+			ll = min_low * b.min_low; lh = (min_low * b.high); hl = (high * b.min_low); hh = high * b.high;
+			if (hl > lh) lh = hl;
+			if (ll > hh) hh = ll;
+			return interval_number(lh, hh);
+		case 1: return interval_number(high * b.min_low, min_low * b.min_low);
+		case 6: return interval_number(min_low * b.high, high * (-b.min_low));
+		case 4: return interval_number(min_low * b.high, min_low * b.min_low);
+		case 5: return interval_number((-high) * b.high, min_low * b.min_low);
+		};
+
 		return interval_number(NAN);
 	}
-}
 
-inline interval_number interval_number::invmul(const double b) const
-{
-	if (!signIsReliable()) return interval_number(NAN);
-	if (b > 0) return interval_number(-b / sup(), -b / minus_inf());
-	else return interval_number(b / minus_inf(), b / sup());
-}
+	inline interval_number interval_number::operator/(const interval_number& b) const
+	{
+		if (!b.signIsReliable()) return NAN;
 
+		typedef union error_approx_type_t
+		{
+			double d;
+			uint64_t u;
 
-inline interval_number interval_number::pow(unsigned int e) const {
+			inline error_approx_type_t() {}
+			inline error_approx_type_t(double a) : d(a) {}
+			inline uint64_t is_negative() const { return u >> 63; }
+		} casted_double;
 
-	const double _uinf = fabs(min_low), _usup = fabs(high);
+		casted_double l1(min_low), h1(high), l2(b.min_low), h2(b.high);
+		uint64_t cfg = (l1.is_negative() << 3) + (h1.is_negative() << 2) + (l2.is_negative() << 1) + (h2.is_negative());
 
-	if (e & (unsigned int)1) { // If e is odd
-		double _uml = min_low, _uh = high;
-		while (--e) { _uml *= _uinf; _uh *= _usup; }
-		return interval_number(_uml, _uh);
+		// cfg	(min_low, high)		(low, high)
+		// 1	++ +-				-+ --
+		// 5	+- +-				-- --
+		// 6	+- -+				-- ++
+		// 9	-+ +-				++ --
+		// 10	-+ -+				++ ++
+		switch (cfg)
+		{
+		case 10: return interval_number(min_low / b.high, high / (-b.min_low));
+		case 9: return interval_number((-high) / b.high, min_low / b.min_low);
+		case 2: return interval_number(min_low / (-b.min_low), high / (-b.min_low));
+		case 1: return interval_number((-high) / b.high, (-min_low) / b.high);
+		case 6: return interval_number(min_low / (-b.min_low), high / b.high);
+		case 5: return interval_number(high / b.min_low, (-min_low) / b.high);
+		};
+
+		return interval_number(NAN);
 	}
-	else { // e is even
-		if (e == 0) return interval_number(1.0);
 
-		if (_uinf > _usup) {
-			double _uml = (min_low > 0 && high > 0) ? 0 : (-_usup);
-			double _uh = _uinf;
-			while (--e) { _uml *= _usup; _uh *= _uinf; }
-			return interval_number(_uml, _uh);
+	inline interval_number interval_number::operator*(const double b) const
+	{
+		if (b >= 0) return interval_number(min_low * b, high * b);
+		else return interval_number(high * (-b), min_low * (-b));
+	}
+
+	inline interval_number interval_number::operator/(const double b) const
+	{
+		if (b >= 0) return interval_number(min_low / b, high / b);
+		else return interval_number(high / (-b), min_low / (-b));
+	}
+
+	inline interval_number interval_number::abs() const {
+		if (min_low < 0) return *this;
+		if (high < 0) return interval_number(high, min_low);
+		return interval_number(0, std::max(high, min_low));
+	}
+
+	inline interval_number interval_number::sqr() const {
+		if (min_low < 0) return interval_number(-min_low * min_low, high * high);
+		if (high < 0) return interval_number(-high * high, min_low * min_low);
+		if (min_low < high) return interval_number(0, high * high);
+		return interval_number(0, min_low * min_low);
+	}
+
+	inline interval_number interval_number::inverse() const
+	{
+		if ((min_low < 0 && high>0) || (min_low > 0 && high < 0))
+		{
+			return interval_number(-1.0 / high, -1.0 / min_low);
 		}
-		else {
-			double _uml = (min_low > 0 && high > 0) ? 0 : (-_uinf);
-			double _uh = _usup;
+		else
+		{
+			return interval_number(NAN);
+		}
+	}
+
+	inline interval_number interval_number::invmul(const double b) const
+	{
+		if (!signIsReliable()) return interval_number(NAN);
+		if (b > 0) return interval_number(-b / sup(), -b / minus_inf());
+		else return interval_number(b / minus_inf(), b / sup());
+	}
+
+
+	inline interval_number interval_number::pow(unsigned int e) const {
+
+		const double _uinf = fabs(min_low), _usup = fabs(high);
+
+		if (e & (unsigned int)1) { // If e is odd
+			double _uml = min_low, _uh = high;
 			while (--e) { _uml *= _uinf; _uh *= _usup; }
 			return interval_number(_uml, _uh);
 		}
-	}
-}
+		else { // e is even
+			if (e == 0) return interval_number(1.0);
 
-inline interval_number interval_number::pow2() const {
-	if (fabs(min_low) > fabs(high)) {
-		if (min_low < 0 || high < 0) return interval_number((-high) * (high), min_low * min_low);
-		else return interval_number(0, min_low * min_low);
+			if (_uinf > _usup) {
+				double _uml = (min_low > 0 && high > 0) ? 0 : (-_usup);
+				double _uh = _uinf;
+				while (--e) { _uml *= _usup; _uh *= _uinf; }
+				return interval_number(_uml, _uh);
+			}
+			else {
+				double _uml = (min_low > 0 && high > 0) ? 0 : (-_uinf);
+				double _uh = _usup;
+				while (--e) { _uml *= _uinf; _uh *= _usup; }
+				return interval_number(_uml, _uh);
+			}
+		}
 	}
-	else {
-		if (min_low < 0 || high < 0) return interval_number((-min_low) * (min_low), high * high);
-		else return interval_number(0, high * high);
-	}
-}
 
-inline interval_number interval_number::pow3() const {
-	// Same fix as the SIMD path: multiply the signed endpoint by the
-	// magnitudes, so that the sign never flips during the accumulation and
-	// FE_UPWARD rounds both fields outwards. See the comment there.
-	const double _uinf = fabs(min_low), _usup = fabs(high);
-	return interval_number((min_low * _uinf) * _uinf, (high * _usup) * _usup);
-}
+	inline interval_number interval_number::pow2() const {
+		if (fabs(min_low) > fabs(high)) {
+			if (min_low < 0 || high < 0) return interval_number((-high) * (high), min_low * min_low);
+			else return interval_number(0, min_low * min_low);
+		}
+		else {
+			if (min_low < 0 || high < 0) return interval_number((-min_low) * (min_low), high * high);
+			else return interval_number(0, high * high);
+		}
+	}
+
+	inline interval_number interval_number::pow3() const {
+		// Same fix as the SIMD path: multiply the signed endpoint by the
+		// magnitudes, so that the sign never flips during the accumulation and
+		// FE_UPWARD rounds both fields outwards. See the comment there.
+		const double _uinf = fabs(min_low), _usup = fabs(high);
+		return interval_number((min_low * _uinf) * _uinf, (high * _usup) * _usup);
+	}
 
 #endif // USE_SIMD_INSTRUCTIONS
 
-inline double interval_number::width() const { return sup() - inf(); }
+	inline double interval_number::width() const { return sup() - inf(); }
 
-inline bool interval_number::signIsReliable() const { return (isNegative() || isPositive()); } // Zero is not accounted for
-inline bool interval_number::containsZero() const { return !signIsReliable(); }
+	inline bool interval_number::signIsReliable() const { return (isNegative() || isPositive()); } // Zero is not accounted for
+	inline bool interval_number::containsZero() const { return !signIsReliable(); }
 
-// Both endpoints must be tested: a NaN stored in min_low alone (e.g. the
-// result of adding an empty interval to a half-infinite one) left the
-// interval corrupted while isNAN() still reported false. IEEE 754-2019
-// Cl. 6.2 propagates a NaN to every result, so a diagnostic predicate that
-// inspects half of the datum defeats its own purpose.
-// '!=' is a quiet predicate (Cl. 5.11, compareQuietNotEqual): unlike '<' it
-// raises no invalid operation on a quiet NaN, so the test stays silent.
-inline bool interval_number::isNAN() const { return sup() != sup() || inf() != inf(); }
+	// Both endpoints must be tested: a NaN stored in min_low alone (e.g. the
+	// result of adding an empty interval to a half-infinite one) left the
+	// interval corrupted while isNAN() still reported false. IEEE 754-2019
+	// Cl. 6.2 propagates a NaN to every result, so a diagnostic predicate that
+	// inspects half of the datum defeats its own purpose.
+	// '!=' is a quiet predicate (Cl. 5.11, compareQuietNotEqual): unlike '<' it
+	// raises no invalid operation on a quiet NaN, so the test stays silent.
+	inline bool interval_number::isNAN() const { return sup() != sup() || inf() != inf(); }
 
-inline double interval_number::getMid() const { return (inf() + sup()) / 2; }
-inline bool interval_number::isExact() const { return inf() == sup(); }
+	inline double interval_number::getMid() const { return (inf() + sup()) / 2; }
+	inline bool interval_number::isExact() const { return inf() == sup(); }
 
-inline bool interval_number::operator<(const interval_number& b) const { return (sup() < b.inf()); }
-inline bool interval_number::operator>(const interval_number& b) const { return (inf() > b.sup()); }
+	inline bool interval_number::operator<(const interval_number& b) const { return (sup() < b.inf()); }
+	inline bool interval_number::operator>(const interval_number& b) const { return (inf() > b.sup()); }
 
-inline bool interval_number::operator<=(const interval_number& b) const { return (sup() <= b.inf()); }
-inline bool interval_number::operator>=(const interval_number& b) const { return (inf() >= b.sup()); }
+	inline bool interval_number::operator<=(const interval_number& b) const { return (sup() <= b.inf()); }
+	inline bool interval_number::operator>=(const interval_number& b) const { return (inf() >= b.sup()); }
 
-inline bool interval_number::operator==(const interval_number& b) const { return (sup() == inf() && sup() == b.inf() && sup() == b.sup()); }
+	inline bool interval_number::operator==(const interval_number& b) const { return (sup() == inf() && sup() == b.inf() && sup() == b.sup()); }
 
-inline bool interval_number::operator!=(const interval_number& b) const { return operator<(b) || operator>(b); }
+	inline bool interval_number::operator!=(const interval_number& b) const { return operator<(b) || operator>(b); }
 
-inline interval_number sqrt(const interval_number& p)
-{
-	// We assume IEEE754, therefore sqrt(double) is correctly rounded.
-	// We also assume that current rounding is towards +infinity.
-	// sqrt(sup) is correctly rounded but sqrt(inf) is rounded on the opposite side.
-	// Hence, we compute sqrt(inf) and check whether rounding takes place. If so, we
-	// shift to the previous representable number to invert the rounding as needed.
-	const double inf = p.inf();
-	const double sup = p.sup();
-	if (inf < 0 || sup < 0) return interval_number(NAN);
-	double srinf = sqrt(inf);
-	const double srsup = sqrt(sup);
-	if (srinf * srinf > inf) (*(((uint64_t*)(&srinf))))--; // This works because srinf is finite
-	return interval_number(-srinf, srsup);
-}
+	inline interval_number sqrt(const interval_number& p)
+	{
+		// We assume IEEE754, therefore sqrt(double) is correctly rounded.
+		// We also assume that current rounding is towards +infinity.
+		// sqrt(sup) is correctly rounded but sqrt(inf) is rounded on the opposite side.
+		// Hence, we compute sqrt(inf) and check whether rounding takes place. If so, we
+		// shift to the previous representable number to invert the rounding as needed.
+		const double inf = p.inf();
+		const double sup = p.sup();
+		if (inf < 0 || sup < 0) return interval_number(NAN);
+		double srinf = ::sqrt(inf);
+		const double srsup = ::sqrt(sup);
+		if (srinf * srinf > inf) (*(((uint64_t*)(&srinf))))--; // This works because srinf is finite
+		return interval_number(-srinf, srsup);
+	}
 
 
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// FUNCTION IMPLEMENTATIONS - EXPANSIONS
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
+	//
+	// FUNCTION IMPLEMENTATIONS - EXPANSIONS
+	//
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Allocate extra-memory
-//#define AllocDoubles(n) ((double *)malloc((n) * sizeof(double)))
-//#define FreeDoubles(p) (free(p))
+	// Allocate extra-memory
+	//#define AllocDoubles(n) ((double *)malloc((n) * sizeof(double)))
+	//#define FreeDoubles(p) (free(p))
 #define AllocDoubles(n) ((double *)expansionObject::mempool.alloc((n) * sizeof(double)))
 #define FreeDoubles(p) (expansionObject::mempool.release(p))
 
-inline void expansionObject::Quick_Two_Sum(const double a, const double b, double& x, double& y) { x = a + b; y = b - (x - a); }
+	inline void expansionObject::Quick_Two_Sum(const double a, const double b, double& x, double& y) { x = a + b; y = b - (x - a); }
 
-inline void expansionObject::quick_Two_Sum(const double a, const double b, double* xy) { Quick_Two_Sum(a, b, xy[1], xy[0]); }
+	inline void expansionObject::quick_Two_Sum(const double a, const double b, double* xy) { Quick_Two_Sum(a, b, xy[1], xy[0]); }
 
-inline void expansionObject::Two_Sum(const double a, const double b, double& x, double& y) {
-	double _bv;
-	x = a + b; _bv = x - a; y = (a - (x - _bv)) + (b - _bv);
-}
+	inline void expansionObject::Two_Sum(const double a, const double b, double& x, double& y) {
+		double _bv;
+		x = a + b; _bv = x - a; y = (a - (x - _bv)) + (b - _bv);
+	}
 
-inline void expansionObject::two_Sum(const double a, const double b, double* xy) { Two_Sum(a, b, xy[1], xy[0]); }
+	inline void expansionObject::two_Sum(const double a, const double b, double* xy) { Two_Sum(a, b, xy[1], xy[0]); }
 
-inline void expansionObject::Two_One_Sum(const double a1, const double a0, const double b, double& x2, double& x1, double& x0) {
-	double _i;
-	Two_Sum(a0, b, _i, x0); Two_Sum(a1, _i, x2, x1);
-}
+	inline void expansionObject::Two_One_Sum(const double a1, const double a0, const double b, double& x2, double& x1, double& x0) {
+		double _i;
+		Two_Sum(a0, b, _i, x0); Two_Sum(a1, _i, x2, x1);
+	}
 
-inline void expansionObject::two_One_Sum(const double *a, const double b, double *x) {
-	Two_One_Sum(a[1], a[0], b, x[2], x[1], x[0]);
-}
+	inline void expansionObject::two_One_Sum(const double* a, const double b, double* x) {
+		Two_One_Sum(a[1], a[0], b, x[2], x[1], x[0]);
+	}
 
-inline void expansionObject::Two_Diff(const double a, const double b, double& x, double& y) {
-	double _bv;
-	x = a - b; _bv = a - x; y = (a - (x + _bv)) + (_bv - b);
-}
+	inline void expansionObject::Two_Diff(const double a, const double b, double& x, double& y) {
+		double _bv;
+		x = a - b; _bv = a - x; y = (a - (x + _bv)) + (_bv - b);
+	}
 
-inline void expansionObject::Two_One_Diff(const double a1, const double a0, const double b, double& x2, double& x1, double& x0) {
-	double _i;
-	Two_Diff(a0, b, _i, x0); Two_Sum(a1, _i, x2, x1);
-}
+	inline void expansionObject::Two_One_Diff(const double a1, const double a0, const double b, double& x2, double& x1, double& x0) {
+		double _i;
+		Two_Diff(a0, b, _i, x0); Two_Sum(a1, _i, x2, x1);
+	}
 
-inline void expansionObject::two_Diff(const double a, const double b, double* xy) { Two_Diff(a, b, xy[1], xy[0]); }
+	inline void expansionObject::two_Diff(const double a, const double b, double* xy) { Two_Diff(a, b, xy[1], xy[0]); }
 
-// Products
+	// Products
 #ifndef USE_AVX2_INSTRUCTIONS 
-inline void expansionObject::Split(double a, double& _ah, double& _al) {
-	double _c = 1.3421772800000003e+008 * a;
-	_ah = _c - (_c - a); _al = a - _ah;
-}
+	inline void expansionObject::Split(double a, double& _ah, double& _al) {
+		double _c = 1.3421772800000003e+008 * a;
+		_ah = _c - (_c - a); _al = a - _ah;
+	}
 
-inline void expansionObject::Two_Prod_PreSplit(double a, double b, double _bh, double _bl, double& x, double& y) {
-	double _ah, _al;
-	x = a * b;
-	Split(a, _ah, _al);
-	y = (_al * _bl) - (((x - (_ah * _bh)) - (_al * _bh)) - (_ah * _bl));
-}
+	inline void expansionObject::Two_Prod_PreSplit(double a, double b, double _bh, double _bl, double& x, double& y) {
+		double _ah, _al;
+		x = a * b;
+		Split(a, _ah, _al);
+		y = (_al * _bl) - (((x - (_ah * _bh)) - (_al * _bh)) - (_ah * _bl));
+	}
 
-inline void expansionObject::Two_Product_2Presplit(double a, double _ah, double _al, double b, double _bh, double _bl, double& x, double& y) {
-	x = a * b; y = (_al * _bl) - (((x - _ah * _bh) - (_al * _bh)) - (_ah * _bl));
-}
+	inline void expansionObject::Two_Product_2Presplit(double a, double _ah, double _al, double b, double _bh, double _bl, double& x, double& y) {
+		x = a * b; y = (_al * _bl) - (((x - _ah * _bh) - (_al * _bh)) - (_ah * _bl));
+	}
 #endif
 
-// [x,y] = [a]*[b]		 Multiplies two expansions [a] and [b] of length one
-inline void expansionObject::Two_Prod(const double a, const double b, double* xy) { Two_Prod(a, b, xy[1], xy[0]); }
+	// [x,y] = [a]*[b]		 Multiplies two expansions [a] and [b] of length one
+	inline void expansionObject::Two_Prod(const double a, const double b, double* xy) { Two_Prod(a, b, xy[1], xy[0]); }
 
 
-// [x,y] = [a]^2		Squares an expansion of length one
-inline void expansionObject::Square(const double a, double* xy) { Square(a, xy[1], xy[0]); }
+	// [x,y] = [a]^2		Squares an expansion of length one
+	inline void expansionObject::Square(const double a, double* xy) { Square(a, xy[1], xy[0]); }
 
-// [x2,x1,x0] = [a1,a0]-[b]		Subtracts an expansion [b] of length one from an expansion [a1,a0] of length two
-inline void expansionObject::two_One_Diff(const double a1, const double a0, const double b, double& x2, double& x1, double& x0)
-{
-	Two_One_Diff(a1, a0, b, x2, x1, x0);
-}
-
-inline void expansionObject::two_One_Diff(const double* a, const double b, double* x) { two_One_Diff(a[1], a[0], b, x[2], x[1], x[0]); }
-
-// [x3,x2,x1,x0] = [a1,a0]*[b]		Multiplies an expansion [a1,a0] of length two by an expansion [b] of length one
-inline void expansionObject::Two_One_Prod(const double* a, const double b, double* x) { Two_One_Prod(a[1], a[0], b, x[3], x[2], x[1], x[0]); }
-
-// [x3,x2,x1,x0] = [a1,a0]+[b1,b0]		Calculates the sum of two expansions of length two
-inline void expansionObject::Two_Two_Sum(const double a1, const double a0, const double b1, const double b0, double& x3, double& x2, double& x1, double& x0) {
-	double _j, _0;
-	Two_One_Sum(a1, a0, b0, _j, _0, x0); Two_One_Sum(_j, _0, b1, x3, x2, x1);
-}
-
-inline void expansionObject::Two_Two_Sum(const double* a, const double* b, double* xy) { Two_Two_Sum(a[1], a[0], b[1], b[0], xy[3], xy[2], xy[1], xy[0]); }
-
-// [x3,x2,x1,x0] = [a1,a0]-[b1,b0]		Calculates the difference between two expansions of length two
-inline void expansionObject::Two_Two_Diff(const double a1, const double a0, const double b1, const double b0, double& x3, double& x2, double& x1, double& x0) {
-	double _j, _0, _u3;
-	Two_One_Diff(a1, a0, b0, _j, _0, x0); Two_One_Diff(_j, _0, b1, _u3, x2, x1); x3 = _u3;
-}
-
-inline void expansionObject::Two_Two_Diff(const double* a, const double* b, double* x) { Two_Two_Diff(a[1], a[0], b[1], b[0], x[3], x[2], x[1], x[0]); }
-
-// Calculates the second component 'y' of the expansion [x,y] = [a]-[b] when 'x' is known
-inline void expansionObject::Two_Diff_Back(const double a, const double b, double& x, double& y) {
-	double _bv;
-	_bv = a - x; y = (a - (x + _bv)) + (_bv - b);
-}
-
-inline void expansionObject::Two_Diff_Back(const double a, const double b, double* xy) { Two_Diff_Back(a, b, xy[1], xy[0]); }
-
-inline void expansionObject::Two_Two_Prod(const double* a, const double* b, double* xy) { Two_Two_Prod(a[1], a[0], b[1], b[0], xy); }
-
-// [e] = -[e]		Inplace inversion
-inline void expansionObject::Gen_Invert(const int elen, double* e) { for (int i = 0; i < elen; i++) e[i] = -e[i]; }
-
-// Same as above, but 'h' is allocated internally. The caller must still call 'free' to release the memory.
-inline int expansionObject::Gen_Sum_With_Alloc(const int elen, const double* e, const int flen, const double* f, double** h)
-{
-	*h = AllocDoubles(elen + flen);
-	return Gen_Sum(elen, e, flen, f, *h);
-}
-
-// Same as above, but 'h' is allocated internally. The caller must still call 'free' to release the memory.
-inline int expansionObject::Gen_Diff_With_Alloc(const int elen, const double* e, const int flen, const double* f, double** h)
-{
-	*h = AllocDoubles(elen + flen);
-	return Gen_Diff(elen, e, flen, f, *h);
-}
-
-// [h] = [e] * 2		Multiplies an expansion by 2
-// 'h' must be allocated by the caller with at least elen components. This is exact up to overflows.
-inline void expansionObject::Double(const int elen, const double* e, double* h) { for (int i = 0; i < elen; i++) h[i] = 2 * e[i]; }
-
-// [h] = [e] * n		Multiplies an expansion by n
-// If 'n' is a power of two, the multiplication is exact
-inline void expansionObject::ExactScale(const int elen, double* e, const double n) { for (int i = 0; i < elen; i++) e[i] *= n; }
-
-inline void expansionObject::print(const int elen, const double* e) { for (int i = 0; i < elen; i++) printf("%e ", e[i]); printf("\n"); }
-
-//#ifdef USE_AVX2_INSTRUCTIONS
-//inline void vfast_Two_Sum(__m128d a, __m128d b, __m128d& x, __m128d& y) {
-//	x = _mm_add_sd(a, b);
-//	y = _mm_sub_sd(b, _mm_sub_sd(x, a));
-//}
-//
-//inline void vtwo_Sum(__m128d a, __m128d b, __m128d& x, __m128d& y) {
-//	x = _mm_add_sd(a, b);
-//	__m128d vbv = _mm_sub_sd(x, a);
-//	y = _mm_add_sd(_mm_sub_sd(a, _mm_sub_sd(x, vbv)), _mm_sub_sd(b, vbv));
-//}
-//
-//inline void vtwo_Prod(const __m128d& a, const __m128d& b, __m128d& x, __m128d& y) {
-//	x = _mm_mul_sd(a, b);
-//	y = _mm_fmsub_sd(a, b, x);
-//}
-//#endif
-
-inline void expansionObject::Two_Prod(const double a, const double b, double& x, double& y)
-{
-#if defined(USE_AVX2_INSTRUCTIONS) && defined(__ARM_NEON)
-	// On ARM/NEON the SIMDe _mm_fmsub_sd is emulated as a separate multiply and
-	// subtract, so the error term collapses to 0 and the exact two-product
-	// silently degrades to plain double precision. std::fma is a genuine
-	// single-rounding FMA on AArch64, which is exactly what this needs.
-	x = a * b;
-	y = std::fma(a, b, -x);
-#elif defined(USE_AVX2_INSTRUCTIONS)
-const __m128d av = _mm_load_sd(&a);
-	const __m128d bv = _mm_load_sd(&b);
-	const __m128d xv = _mm_mul_sd(av, bv);
-	y = _mm_cvtsd_f64(_mm_fmsub_sd(av, bv, xv));
-	x = _mm_cvtsd_f64(xv);
-	//__m128d x1, x2, x3;
-	//x1 = _mm_set_sd(a);
-	//x2 = _mm_set_sd(b);
-	//vtwo_Prod(x1, x2, x3, x2);
-	//x = _mm_cvtsd_f64(x3);
-	//y = _mm_cvtsd_f64(x2);
-#else
-	double _ah, _al, _bh, _bl;
-	x = a * b;
-	Split(a, _ah, _al); Split(b, _bh, _bl);
-	y = ((_ah * _bh - x) + _ah * _bl + _al * _bh) + _al * _bl;
-#endif
-}
-
-inline void expansionObject::Square(const double a, double& x, double& y)
-{
-#if defined(USE_AVX2_INSTRUCTIONS) && defined(__ARM_NEON)
-	// See Two_Prod: SIMDe's _mm_fmsub_sd is not a true fused op on NEON.
-	x = a * a;
-	y = std::fma(a, a, -x);
-#elif defined(USE_AVX2_INSTRUCTIONS)
-const __m128d av = _mm_load_sd(&a);
-	const __m128d xv = _mm_mul_sd(av, av);
-	y = _mm_cvtsd_f64(_mm_fmsub_sd(av, av, xv));
-	x = _mm_cvtsd_f64(xv);
-	//__m128d x1, x2, x3;
-	//x1 = _mm_set_sd(a);
-	//vtwo_Prod(x1, x1, x3, x2);
-	//x = _mm_cvtsd_f64(x3);
-	//y = _mm_cvtsd_f64(x2);
-#else
-	double _ah, _al;
-	x = a * a;
-	Split(a, _ah, _al);
-	y = (_al * _al) - ((x - (_ah * _ah)) - ((_ah + _ah) * _al));
-#endif
-}
-
-inline void expansionObject::Two_One_Prod(const double a1, const double a0, const double b, double& x3, double& x2, double& x1, double& x0)
-{
-#ifdef USE_AVX2_INSTRUCTIONS
-	double _i, _j, _k, _0;
-	Two_Prod(a0, b, _i, x0); Two_Prod(a1, b, _j, _0);
-	Two_Sum(_i, _0, _k, x1); Quick_Two_Sum(_j, _k, x3, x2);
-#else
-	double _bh, _bl, _i, _j, _0, _k;
-	Split(b, _bh, _bl);
-	Two_Prod_PreSplit(a0, b, _bh, _bl, _i, x0); Two_Prod_PreSplit(a1, b, _bh, _bl, _j, _0);
-	Two_Sum(_i, _0, _k, x1); Quick_Two_Sum(_j, _k, x3, x2);
-#endif
-}
-
-inline void expansionObject::Two_Two_Prod(const double a1, const double a0, const double b1, const double b0, double* h)
-{
-#ifdef USE_AVX2_INSTRUCTIONS
-	double _m, _n, _i, _j, _k, _0, _1, _2, _l;
-	Two_Prod(a0, b0, _i, h[0]);
-	Two_Prod(a1, b0, _j, _0);
-	Two_Sum(_i, _0, _k, _1);
-	Quick_Two_Sum(_j, _k, _l, _2);
-	Two_Prod(a0, b1, _i, _0);
-	Two_Sum(_1, _0, _k, h[1]);
-	Two_Sum(_2, _k, _j, _1);
-	Two_Sum(_l, _j, _m, _2);
-	Two_Prod(a1, b1, _j, _0);
-	Two_Sum(_i, _0, _n, _0);
-	Two_Sum(_1, _0, _i, h[2]);
-	Two_Sum(_2, _i, _k, _1);
-	Two_Sum(_m, _k, _l, _2);
-	Two_Sum(_j, _n, _k, _0);
-	Two_Sum(_1, _0, _j, h[3]);
-	Two_Sum(_2, _j, _i, _1);
-	Two_Sum(_l, _i, _m, _2);
-	Two_Sum(_1, _k, _i, h[4]);
-	Two_Sum(_2, _i, _k, h[5]);
-	Two_Sum(_m, _k, h[7], h[6]);
-#else
-	double _ah, _al, _bh, _bl, _ch, _cl, _m, _n, _i, _j, _0, _1, _2, _k, _l;
-	Split(a0, _ah, _al);
-	Split(b0, _bh, _bl);
-	Two_Product_2Presplit(a0, _ah, _al, b0, _bh, _bl, _i, h[0]);
-	Split(a1, _ch, _cl);
-	Two_Product_2Presplit(a1, _ch, _cl, b0, _bh, _bl, _j, _0);
-	Two_Sum(_i, _0, _k, _1);
-	Quick_Two_Sum(_j, _k, _l, _2);
-	Split(b1, _bh, _bl);
-	Two_Product_2Presplit(a0, _ah, _al, b1, _bh, _bl, _i, _0);
-	Two_Sum(_1, _0, _k, h[1]);
-	Two_Sum(_2, _k, _j, _1);
-	Two_Sum(_l, _j, _m, _2);
-	Two_Product_2Presplit(a1, _ch, _cl, b1, _bh, _bl, _j, _0);
-	Two_Sum(_i, _0, _n, _0);
-	Two_Sum(_1, _0, _i, h[2]);
-	Two_Sum(_2, _i, _k, _1);
-	Two_Sum(_m, _k, _l, _2);
-	Two_Sum(_j, _n, _k, _0);
-	Two_Sum(_1, _0, _j, h[3]);
-	Two_Sum(_2, _j, _i, _1);
-	Two_Sum(_l, _i, _m, _2);
-	Two_Sum(_1, _k, _i, h[4]);
-	Two_Sum(_2, _i, _k, h[5]);
-	Two_Sum(_m, _k, h[7], h[6]);
-#endif
-}
-
-inline int expansionObject::Gen_Sum(const int elen, const double* e, const int flen, const double* f, double* h)
-{
-	double Q, Qn, hh, s;
-	const double* en = e, * fn = f, * elast = e + elen, * flast = f + flen;
-	int h_k = 0;
-
-	Q = (fabs(*fn) > fabs(*en)) ? (*en++) : (*fn++);
-
-	if ((en < elast) && (fn < flast))
+	// [x2,x1,x0] = [a1,a0]-[b]		Subtracts an expansion [b] of length one from an expansion [a1,a0] of length two
+	inline void expansionObject::two_One_Diff(const double a1, const double a0, const double b, double& x2, double& x1, double& x0)
 	{
-		s = (fabs(*fn) > fabs(*en)) ? (*en++) : (*fn++);
-		Quick_Two_Sum(s, Q, Qn, hh);
-		Q = Qn;
-		if (hh != 0.0) h[h_k++] = hh;
-		while ((en < elast) && (fn < flast))
+		Two_One_Diff(a1, a0, b, x2, x1, x0);
+	}
+
+	inline void expansionObject::two_One_Diff(const double* a, const double b, double* x) { two_One_Diff(a[1], a[0], b, x[2], x[1], x[0]); }
+
+	// [x3,x2,x1,x0] = [a1,a0]*[b]		Multiplies an expansion [a1,a0] of length two by an expansion [b] of length one
+	inline void expansionObject::Two_One_Prod(const double* a, const double b, double* x) { Two_One_Prod(a[1], a[0], b, x[3], x[2], x[1], x[0]); }
+
+	// [x3,x2,x1,x0] = [a1,a0]+[b1,b0]		Calculates the sum of two expansions of length two
+	inline void expansionObject::Two_Two_Sum(const double a1, const double a0, const double b1, const double b0, double& x3, double& x2, double& x1, double& x0) {
+		double _j, _0;
+		Two_One_Sum(a1, a0, b0, _j, _0, x0); Two_One_Sum(_j, _0, b1, x3, x2, x1);
+	}
+
+	inline void expansionObject::Two_Two_Sum(const double* a, const double* b, double* xy) { Two_Two_Sum(a[1], a[0], b[1], b[0], xy[3], xy[2], xy[1], xy[0]); }
+
+	// [x3,x2,x1,x0] = [a1,a0]-[b1,b0]		Calculates the difference between two expansions of length two
+	inline void expansionObject::Two_Two_Diff(const double a1, const double a0, const double b1, const double b0, double& x3, double& x2, double& x1, double& x0) {
+		double _j, _0, _u3;
+		Two_One_Diff(a1, a0, b0, _j, _0, x0); Two_One_Diff(_j, _0, b1, _u3, x2, x1); x3 = _u3;
+	}
+
+	inline void expansionObject::Two_Two_Diff(const double* a, const double* b, double* x) { Two_Two_Diff(a[1], a[0], b[1], b[0], x[3], x[2], x[1], x[0]); }
+
+	// Calculates the second component 'y' of the expansion [x,y] = [a]-[b] when 'x' is known
+	inline void expansionObject::Two_Diff_Back(const double a, const double b, double& x, double& y) {
+		double _bv;
+		_bv = a - x; y = (a - (x + _bv)) + (_bv - b);
+	}
+
+	inline void expansionObject::Two_Diff_Back(const double a, const double b, double* xy) { Two_Diff_Back(a, b, xy[1], xy[0]); }
+
+	inline void expansionObject::Two_Two_Prod(const double* a, const double* b, double* xy) { Two_Two_Prod(a[1], a[0], b[1], b[0], xy); }
+
+	// [e] = -[e]		Inplace inversion
+	inline void expansionObject::Gen_Invert(const int elen, double* e) { for (int i = 0; i < elen; i++) e[i] = -e[i]; }
+
+	// Same as above, but 'h' is allocated internally. The caller must still call 'free' to release the memory.
+	inline int expansionObject::Gen_Sum_With_Alloc(const int elen, const double* e, const int flen, const double* f, double** h)
+	{
+		*h = AllocDoubles(elen + flen);
+		return Gen_Sum(elen, e, flen, f, *h);
+	}
+
+	// Same as above, but 'h' is allocated internally. The caller must still call 'free' to release the memory.
+	inline int expansionObject::Gen_Diff_With_Alloc(const int elen, const double* e, const int flen, const double* f, double** h)
+	{
+		*h = AllocDoubles(elen + flen);
+		return Gen_Diff(elen, e, flen, f, *h);
+	}
+
+	// [h] = [e] * 2		Multiplies an expansion by 2
+	// 'h' must be allocated by the caller with at least elen components. This is exact up to overflows.
+	inline void expansionObject::Double(const int elen, const double* e, double* h) { for (int i = 0; i < elen; i++) h[i] = 2 * e[i]; }
+
+	// [h] = [e] * n		Multiplies an expansion by n
+	// If 'n' is a power of two, the multiplication is exact
+	inline void expansionObject::ExactScale(const int elen, double* e, const double n) { for (int i = 0; i < elen; i++) e[i] *= n; }
+
+	inline void expansionObject::print(const int elen, const double* e) { for (int i = 0; i < elen; i++) printf("%e ", e[i]); printf("\n"); }
+
+	//#ifdef USE_AVX2_INSTRUCTIONS
+	//inline void vfast_Two_Sum(__m128d a, __m128d b, __m128d& x, __m128d& y) {
+	//	x = _mm_add_sd(a, b);
+	//	y = _mm_sub_sd(b, _mm_sub_sd(x, a));
+	//}
+	//
+	//inline void vtwo_Sum(__m128d a, __m128d b, __m128d& x, __m128d& y) {
+	//	x = _mm_add_sd(a, b);
+	//	__m128d vbv = _mm_sub_sd(x, a);
+	//	y = _mm_add_sd(_mm_sub_sd(a, _mm_sub_sd(x, vbv)), _mm_sub_sd(b, vbv));
+	//}
+	//
+	//inline void vtwo_Prod(const __m128d& a, const __m128d& b, __m128d& x, __m128d& y) {
+	//	x = _mm_mul_sd(a, b);
+	//	y = _mm_fmsub_sd(a, b, x);
+	//}
+	//#endif
+
+	inline void expansionObject::Two_Prod(const double a, const double b, double& x, double& y)
+	{
+#if defined(USE_AVX2_INSTRUCTIONS) && defined(__ARM_NEON)
+		// On ARM/NEON the SIMDe _mm_fmsub_sd is emulated as a separate multiply and
+		// subtract, so the error term collapses to 0 and the exact two-product
+		// silently degrades to plain double precision. std::fma is a genuine
+		// single-rounding FMA on AArch64, which is exactly what this needs.
+		x = a * b;
+		y = std::fma(a, b, -x);
+#elif defined(USE_AVX2_INSTRUCTIONS)
+		const __m128d av = _mm_load_sd(&a);
+		const __m128d bv = _mm_load_sd(&b);
+		const __m128d xv = _mm_mul_sd(av, bv);
+		y = _mm_cvtsd_f64(_mm_fmsub_sd(av, bv, xv));
+		x = _mm_cvtsd_f64(xv);
+		//__m128d x1, x2, x3;
+		//x1 = _mm_set_sd(a);
+		//x2 = _mm_set_sd(b);
+		//vtwo_Prod(x1, x2, x3, x2);
+		//x = _mm_cvtsd_f64(x3);
+		//y = _mm_cvtsd_f64(x2);
+#else
+		double _ah, _al, _bh, _bl;
+		x = a * b;
+		Split(a, _ah, _al); Split(b, _bh, _bl);
+		y = ((_ah * _bh - x) + _ah * _bl + _al * _bh) + _al * _bl;
+#endif
+	}
+
+	inline void expansionObject::Square(const double a, double& x, double& y)
+	{
+#if defined(USE_AVX2_INSTRUCTIONS) && defined(__ARM_NEON)
+		// See Two_Prod: SIMDe's _mm_fmsub_sd is not a true fused op on NEON.
+		x = a * a;
+		y = std::fma(a, a, -x);
+#elif defined(USE_AVX2_INSTRUCTIONS)
+		const __m128d av = _mm_load_sd(&a);
+		const __m128d xv = _mm_mul_sd(av, av);
+		y = _mm_cvtsd_f64(_mm_fmsub_sd(av, av, xv));
+		x = _mm_cvtsd_f64(xv);
+		//__m128d x1, x2, x3;
+		//x1 = _mm_set_sd(a);
+		//vtwo_Prod(x1, x1, x3, x2);
+		//x = _mm_cvtsd_f64(x3);
+		//y = _mm_cvtsd_f64(x2);
+#else
+		double _ah, _al;
+		x = a * a;
+		Split(a, _ah, _al);
+		y = (_al * _al) - ((x - (_ah * _ah)) - ((_ah + _ah) * _al));
+#endif
+	}
+
+	inline void expansionObject::Two_One_Prod(const double a1, const double a0, const double b, double& x3, double& x2, double& x1, double& x0)
+	{
+#ifdef USE_AVX2_INSTRUCTIONS
+		double _i, _j, _k, _0;
+		Two_Prod(a0, b, _i, x0); Two_Prod(a1, b, _j, _0);
+		Two_Sum(_i, _0, _k, x1); Quick_Two_Sum(_j, _k, x3, x2);
+#else
+		double _bh, _bl, _i, _j, _0, _k;
+		Split(b, _bh, _bl);
+		Two_Prod_PreSplit(a0, b, _bh, _bl, _i, x0); Two_Prod_PreSplit(a1, b, _bh, _bl, _j, _0);
+		Two_Sum(_i, _0, _k, x1); Quick_Two_Sum(_j, _k, x3, x2);
+#endif
+	}
+
+	inline void expansionObject::Two_Two_Prod(const double a1, const double a0, const double b1, const double b0, double* h)
+	{
+#ifdef USE_AVX2_INSTRUCTIONS
+		double _m, _n, _i, _j, _k, _0, _1, _2, _l;
+		Two_Prod(a0, b0, _i, h[0]);
+		Two_Prod(a1, b0, _j, _0);
+		Two_Sum(_i, _0, _k, _1);
+		Quick_Two_Sum(_j, _k, _l, _2);
+		Two_Prod(a0, b1, _i, _0);
+		Two_Sum(_1, _0, _k, h[1]);
+		Two_Sum(_2, _k, _j, _1);
+		Two_Sum(_l, _j, _m, _2);
+		Two_Prod(a1, b1, _j, _0);
+		Two_Sum(_i, _0, _n, _0);
+		Two_Sum(_1, _0, _i, h[2]);
+		Two_Sum(_2, _i, _k, _1);
+		Two_Sum(_m, _k, _l, _2);
+		Two_Sum(_j, _n, _k, _0);
+		Two_Sum(_1, _0, _j, h[3]);
+		Two_Sum(_2, _j, _i, _1);
+		Two_Sum(_l, _i, _m, _2);
+		Two_Sum(_1, _k, _i, h[4]);
+		Two_Sum(_2, _i, _k, h[5]);
+		Two_Sum(_m, _k, h[7], h[6]);
+#else
+		double _ah, _al, _bh, _bl, _ch, _cl, _m, _n, _i, _j, _0, _1, _2, _k, _l;
+		Split(a0, _ah, _al);
+		Split(b0, _bh, _bl);
+		Two_Product_2Presplit(a0, _ah, _al, b0, _bh, _bl, _i, h[0]);
+		Split(a1, _ch, _cl);
+		Two_Product_2Presplit(a1, _ch, _cl, b0, _bh, _bl, _j, _0);
+		Two_Sum(_i, _0, _k, _1);
+		Quick_Two_Sum(_j, _k, _l, _2);
+		Split(b1, _bh, _bl);
+		Two_Product_2Presplit(a0, _ah, _al, b1, _bh, _bl, _i, _0);
+		Two_Sum(_1, _0, _k, h[1]);
+		Two_Sum(_2, _k, _j, _1);
+		Two_Sum(_l, _j, _m, _2);
+		Two_Product_2Presplit(a1, _ch, _cl, b1, _bh, _bl, _j, _0);
+		Two_Sum(_i, _0, _n, _0);
+		Two_Sum(_1, _0, _i, h[2]);
+		Two_Sum(_2, _i, _k, _1);
+		Two_Sum(_m, _k, _l, _2);
+		Two_Sum(_j, _n, _k, _0);
+		Two_Sum(_1, _0, _j, h[3]);
+		Two_Sum(_2, _j, _i, _1);
+		Two_Sum(_l, _i, _m, _2);
+		Two_Sum(_1, _k, _i, h[4]);
+		Two_Sum(_2, _i, _k, h[5]);
+		Two_Sum(_m, _k, h[7], h[6]);
+#endif
+	}
+
+	inline int expansionObject::Gen_Sum(const int elen, const double* e, const int flen, const double* f, double* h)
+	{
+		double Q, Qn, hh, s;
+		const double* en = e, * fn = f, * elast = e + elen, * flast = f + flen;
+		int h_k = 0;
+
+		Q = (fabs(*fn) > fabs(*en)) ? (*en++) : (*fn++);
+
+		if ((en < elast) && (fn < flast))
 		{
 			s = (fabs(*fn) > fabs(*en)) ? (*en++) : (*fn++);
-			Two_Sum(s, Q, Qn, hh);
+			Quick_Two_Sum(s, Q, Qn, hh);
 			Q = Qn;
 			if (hh != 0.0) h[h_k++] = hh;
+			while ((en < elast) && (fn < flast))
+			{
+				s = (fabs(*fn) > fabs(*en)) ? (*en++) : (*fn++);
+				Two_Sum(s, Q, Qn, hh);
+				Q = Qn;
+				if (hh != 0.0) h[h_k++] = hh;
+			}
 		}
+
+		while (en < elast)
+		{
+			Two_Sum(Q, (*en), Qn, hh);
+			Q = Qn;
+			if (hh != 0.0) h[h_k++] = hh;
+			en++;
+		}
+
+		while (fn < flast)
+		{
+			Two_Sum(Q, (*fn), Qn, hh);
+			Q = Qn;
+			if (hh != 0.0) h[h_k++] = hh;
+			fn++;
+		}
+		if ((Q != 0.0) || (h_k == 0)) h[h_k++] = Q;
+
+		return h_k;
 	}
 
-	while (en < elast)
+	inline int expansionObject::Gen_Diff(const int elen, const double* e, const int flen, const double* f, double* h)
 	{
-		Two_Sum(Q, (*en), Qn, hh);
-		Q = Qn;
-		if (hh != 0.0) h[h_k++] = hh;
-		en++;
-	}
+		double Q, Qn, hh, s;
+		const double* en = e, * fn = f, * elast = e + elen, * flast = f + flen;
+		int h_k = 0;
 
-	while (fn < flast)
-	{
-		Two_Sum(Q, (*fn), Qn, hh);
-		Q = Qn;
-		if (hh != 0.0) h[h_k++] = hh;
-		fn++;
-	}
-	if ((Q != 0.0) || (h_k == 0)) h[h_k++] = Q;
+		Q = (fabs(*fn) > fabs(*en)) ? (*en++) : (-*fn++);
 
-	return h_k;
-}
-
-inline int expansionObject::Gen_Diff(const int elen, const double* e, const int flen, const double* f, double* h)
-{
-	double Q, Qn, hh, s;
-	const double* en = e, * fn = f, * elast = e + elen, * flast = f + flen;
-	int h_k = 0;
-
-	Q = (fabs(*fn) > fabs(*en)) ? (*en++) : (-*fn++);
-
-	if ((en < elast) && (fn < flast))
-	{
-		s = (fabs(*fn) > fabs(*en)) ? (*en++) : (-*fn++);
-		Quick_Two_Sum(s, Q, Qn, hh);
-		Q = Qn;
-		if (hh != 0.0) h[h_k++] = hh;
-		while ((en < elast) && (fn < flast))
+		if ((en < elast) && (fn < flast))
 		{
 			s = (fabs(*fn) > fabs(*en)) ? (*en++) : (-*fn++);
-			Two_Sum(s, Q, Qn, hh);
+			Quick_Two_Sum(s, Q, Qn, hh);
+			Q = Qn;
+			if (hh != 0.0) h[h_k++] = hh;
+			while ((en < elast) && (fn < flast))
+			{
+				s = (fabs(*fn) > fabs(*en)) ? (*en++) : (-*fn++);
+				Two_Sum(s, Q, Qn, hh);
+				Q = Qn;
+				if (hh != 0.0) h[h_k++] = hh;
+			}
+		}
+
+		while (en < elast)
+		{
+			Two_Sum(Q, (*en), Qn, hh);
+			Q = Qn;
+			if (hh != 0.0) h[h_k++] = hh;
+			en++;
+		}
+
+		while (fn < flast)
+		{
+			s = *fn++;
+			Two_Diff(Q, s, Qn, hh);
 			Q = Qn;
 			if (hh != 0.0) h[h_k++] = hh;
 		}
+		if ((Q != 0.0) || (h_k == 0)) h[h_k++] = Q;
+
+		return h_k;
 	}
 
-	while (en < elast)
+
+	inline int expansionObject::Gen_Scale(const int elen, const double* e, const double b, double* h)
 	{
-		Two_Sum(Q, (*en), Qn, hh);
-		Q = Qn;
-		if (hh != 0.0) h[h_k++] = hh;
-		en++;
-	}
+		double Q, sum, hh, pr1, pr0;
+		const double* ei = e, * elast = e + elen;
 
-	while (fn < flast)
-	{
-		s = *fn++;
-		Two_Diff(Q, s, Qn, hh);
-		Q = Qn;
-		if (hh != 0.0) h[h_k++] = hh;
-	}
-	if ((Q != 0.0) || (h_k == 0)) h[h_k++] = Q;
-
-	return h_k;
-}
-
-
-inline int expansionObject::Gen_Scale(const int elen, const double* e, const double b, double* h)
-{
-	double Q, sum, hh, pr1, pr0;
-	const double* ei = e, * elast = e + elen;
-
-	int k = 0;
-	Two_Prod(*ei, b, Q, hh);
-	if (hh != 0) h[k++] = hh;
-
-	while (++ei < elast) {
-		Two_Prod(*ei, b, pr1, pr0);
-		Two_Sum(Q, pr0, sum, hh);
+		int k = 0;
+		Two_Prod(*ei, b, Q, hh);
 		if (hh != 0) h[k++] = hh;
-		Quick_Two_Sum(pr1, sum, Q, hh);
-		if (hh != 0) h[k++] = hh;
+
+		while (++ei < elast) {
+			Two_Prod(*ei, b, pr1, pr0);
+			Two_Sum(Q, pr0, sum, hh);
+			if (hh != 0) h[k++] = hh;
+			Quick_Two_Sum(pr1, sum, Q, hh);
+			if (hh != 0) h[k++] = hh;
+		}
+		if ((Q != 0.0) || (k == 0)) h[k++] = Q;
+		return k;
 	}
-	if ((Q != 0.0) || (k == 0)) h[k++] = Q;
-	return k;
-}
 
 
-inline void expansionObject::Two_Square(const double& a1, const double& a0, double* x)
-{
-	double _j, _0, _k, _1, _l, _2;
-	Square(a0, _j, x[0]);
-	_0 = a0 + a0;
-	Two_Prod(a1, _0, _k, _1);
-	Two_One_Sum(_k, _1, _j, _l, _2, x[1]);
-	Square(a1, _j, _1);
-	Two_Two_Sum(_j, _1, _l, _2, x[5], x[4], x[3], x[2]);
-}
-
-inline void expansionObject::Two_Square(const double* a, double* x) { Two_Square(a[1], a[0], x); }
-
-inline int expansionObject::Sub_product(const int alen, const double* a, const int blen, const double* b, double* h)
-{
-	if (alen == 1) return Gen_Scale(blen, b, a[0], h);
-	int partial = 2 * alen * blen;
-	int allmem = 2 * (partial + blen);
-	double ph1_p[1024];
-	double* ph1 = (allmem > 1024) ? (AllocDoubles(allmem)) : (ph1_p);
-	double* ph2 = ph1 + partial;
-	double* th = ph2 + partial;
-	double* ph[2] = { ph1, ph2 };
-	int first = 0;
-	int phl = Gen_Scale(blen, b, a[0], ph[0]);
-
-	for (int i = 1; i < alen; i++)
+	inline void expansionObject::Two_Square(const double& a1, const double& a0, double* x)
 	{
-		int thl = Gen_Scale(blen, b, a[i], th);
-		first = i & 1;
-		phl = Gen_Sum(phl, ph[(i + 1) & 1], thl, th, ph[first]);
-	}
-	if (first) for (int i = 0; i < phl; i++) h[i] = ph2[i];
-	else for (int i = 0; i < phl; i++) h[i] = ph1[i];
-	if (allmem > 1024) FreeDoubles(ph1);
-	return phl;
-}
-
-
-inline int expansionObject::Gen_Product(const int alen, const double* a, const int blen, const double* b, double* h)
-{
-	if (blen == 1) return Gen_Scale(alen, a, b[0], h);
-	else if (alen < blen) return Sub_product(alen, a, blen, b, h);
-	else return Sub_product(blen, b, alen, a, h);
-}
-
-
-inline int expansionObject::Gen_Square(const int alen, const double* a, double* h)
-{
-	// This might (and should!) be optimized
-	if (alen == 1) {
-		Square(*a, h);
-		return 2;
-	}
-	
-	if (alen == 2) {
-		Two_Square(a, h);
-		return 6;
+		double _j, _0, _k, _1, _l, _2;
+		Square(a0, _j, x[0]);
+		_0 = a0 + a0;
+		Two_Prod(a1, _0, _k, _1);
+		Two_One_Sum(_k, _1, _j, _l, _2, x[1]);
+		Square(a1, _j, _1);
+		Two_Two_Sum(_j, _1, _l, _2, x[5], x[4], x[3], x[2]);
 	}
 
-	int partial = 2 * alen * alen;
-	int allmem = 2 * (partial + alen);
-	double ph1_p[1024];
-	double* ph1 = (allmem > 1024) ? (AllocDoubles(allmem)) : (ph1_p);
-	double* ph2 = ph1 + partial;
-	double* th = ph2 + partial;
-	double* ph[2] = { ph1, ph2 };
-	int first = 0;
-	int phl = Gen_Scale(alen, a, a[0], ph[0]);
+	inline void expansionObject::Two_Square(const double* a, double* x) { Two_Square(a[1], a[0], x); }
 
-	for (int i = 1; i < alen; i++)
+	inline int expansionObject::Sub_product(const int alen, const double* a, const int blen, const double* b, double* h)
 	{
-		int thl = Gen_Scale(alen, a, a[i], th);
-		first = i & 1;
-		phl = Gen_Sum(phl, ph[(i + 1) & 1], thl, th, ph[first]);
+		if (alen == 1) return Gen_Scale(blen, b, a[0], h);
+		int partial = 2 * alen * blen;
+		int allmem = 2 * (partial + blen);
+		double ph1_p[1024];
+		double* ph1 = (allmem > 1024) ? (AllocDoubles(allmem)) : (ph1_p);
+		double* ph2 = ph1 + partial;
+		double* th = ph2 + partial;
+		double* ph[2] = { ph1, ph2 };
+		int first = 0;
+		int phl = Gen_Scale(blen, b, a[0], ph[0]);
+
+		for (int i = 1; i < alen; i++)
+		{
+			int thl = Gen_Scale(blen, b, a[i], th);
+			first = i & 1;
+			phl = Gen_Sum(phl, ph[(i + 1) & 1], thl, th, ph[first]);
+		}
+		if (first) for (int i = 0; i < phl; i++) h[i] = ph2[i];
+		else for (int i = 0; i < phl; i++) h[i] = ph1[i];
+		if (allmem > 1024) FreeDoubles(ph1);
+		return phl;
 	}
-	if (first) for (int i = 0; i < phl; i++) h[i] = ph2[i];
-	else for (int i = 0; i < phl; i++) h[i] = ph1[i];
-	if (allmem > 1024) FreeDoubles(ph1);
-	return phl;
-}
 
-inline double expansionObject::To_Double(const int elen, const double* e)
-{
-	double Q = e[0];
-	for (int e_i = 1; e_i < elen; e_i++) Q += e[e_i];
-	return Q;
-}
 
-inline int expansionObject::Gen_Product_With_Alloc(const int alen, const double* a, const int blen, const double* b, double** h)
-{
-	int h_len = alen * blen * 2;
-	if (h_len < 8) h_len = 8;
-	*h = AllocDoubles(h_len);
-	return Gen_Product(alen, a, blen, b, *h);
-}
-
-inline int expansionObject::Double_With_PreAlloc(const int elen, const double* e, double** h, const int hlen)
-{
-	int newlen = elen;
-	if (hlen < newlen) *h = AllocDoubles(newlen);
-	Double(elen, e, *h);
-	return newlen;
-}
-
-inline int expansionObject::Gen_Scale_With_PreAlloc(const int elen, const double* e, const double& b, double** h, const int hlen)
-{
-	int newlen = elen * 2;
-	if (hlen < newlen) *h = AllocDoubles(newlen);
-	return Gen_Scale(elen, e, b, *h);
-}
-
-inline int expansionObject::Gen_Sum_With_PreAlloc(const int elen, const double* e, const int flen, const double* f, double** h, const int hlen)
-{
-	int newlen = elen + flen;
-	if (hlen < newlen) *h = AllocDoubles(newlen);
-	return Gen_Sum(elen, e, flen, f, *h);
-}
-
-inline int expansionObject::Gen_Diff_With_PreAlloc(const int elen, const double* e, const int flen, const double* f, double** h, const int hlen)
-{
-	int newlen = elen + flen;
-	if (hlen < newlen) *h = AllocDoubles(newlen);
-	return Gen_Diff(elen, e, flen, f, *h);
-}
-
-inline int expansionObject::Gen_Product_With_PreAlloc(const int alen, const double* a, const int blen, const double* b, double** h, const int hlen)
-{
-	int newlen = alen * blen * 2;
-	if (hlen < newlen || hlen < 8)
+	inline int expansionObject::Gen_Product(const int alen, const double* a, const int blen, const double* b, double* h)
 	{
-		if (newlen < 8) newlen = 8;
-		*h = AllocDoubles(newlen);
+		if (blen == 1) return Gen_Scale(alen, a, b[0], h);
+		else if (alen < blen) return Sub_product(alen, a, blen, b, h);
+		else return Sub_product(blen, b, alen, a, h);
 	}
-	return Gen_Product(alen, a, blen, b, *h);
-}
 
 
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// FUNCTION IMPLEMENTATIONS - EXPANSION INTERFACE
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
+	inline int expansionObject::Gen_Square(const int alen, const double* a, double* h)
+	{
+		// This might (and should!) be optimized
+		if (alen == 1) {
+			Square(*a, h);
+			return 2;
+		}
+
+		if (alen == 2) {
+			Two_Square(a, h);
+			return 6;
+		}
+
+		int partial = 2 * alen * alen;
+		int allmem = 2 * (partial + alen);
+		double ph1_p[1024];
+		double* ph1 = (allmem > 1024) ? (AllocDoubles(allmem)) : (ph1_p);
+		double* ph2 = ph1 + partial;
+		double* th = ph2 + partial;
+		double* ph[2] = { ph1, ph2 };
+		int first = 0;
+		int phl = Gen_Scale(alen, a, a[0], ph[0]);
+
+		for (int i = 1; i < alen; i++)
+		{
+			int thl = Gen_Scale(alen, a, a[i], th);
+			first = i & 1;
+			phl = Gen_Sum(phl, ph[(i + 1) & 1], thl, th, ph[first]);
+		}
+		if (first) for (int i = 0; i < phl; i++) h[i] = ph2[i];
+		else for (int i = 0; i < phl; i++) h[i] = ph1[i];
+		if (allmem > 1024) FreeDoubles(ph1);
+		return phl;
+	}
+
+	inline double expansionObject::To_Double(const int elen, const double* e)
+	{
+		double Q = e[0];
+		for (int e_i = 1; e_i < elen; e_i++) Q += e[e_i];
+		return Q;
+	}
+
+	inline int expansionObject::Gen_Product_With_Alloc(const int alen, const double* a, const int blen, const double* b, double** h)
+	{
+		int h_len = alen * blen * 2;
+		if (h_len < 8) h_len = 8;
+		*h = AllocDoubles(h_len);
+		return Gen_Product(alen, a, blen, b, *h);
+	}
+
+	inline int expansionObject::Double_With_PreAlloc(const int elen, const double* e, double** h, const int hlen)
+	{
+		int newlen = elen;
+		if (hlen < newlen) *h = AllocDoubles(newlen);
+		Double(elen, e, *h);
+		return newlen;
+	}
+
+	inline int expansionObject::Gen_Scale_With_PreAlloc(const int elen, const double* e, const double& b, double** h, const int hlen)
+	{
+		int newlen = elen * 2;
+		if (hlen < newlen) *h = AllocDoubles(newlen);
+		return Gen_Scale(elen, e, b, *h);
+	}
+
+	inline int expansionObject::Gen_Sum_With_PreAlloc(const int elen, const double* e, const int flen, const double* f, double** h, const int hlen)
+	{
+		int newlen = elen + flen;
+		if (hlen < newlen) *h = AllocDoubles(newlen);
+		return Gen_Sum(elen, e, flen, f, *h);
+	}
+
+	inline int expansionObject::Gen_Diff_With_PreAlloc(const int elen, const double* e, const int flen, const double* f, double** h, const int hlen)
+	{
+		int newlen = elen + flen;
+		if (hlen < newlen) *h = AllocDoubles(newlen);
+		return Gen_Diff(elen, e, flen, f, *h);
+	}
+
+	inline int expansionObject::Gen_Product_With_PreAlloc(const int alen, const double* a, const int blen, const double* b, double** h, const int hlen)
+	{
+		int newlen = alen * blen * 2;
+		if (hlen < newlen || hlen < 8)
+		{
+			if (newlen < 8) newlen = 8;
+			*h = AllocDoubles(newlen);
+		}
+		return Gen_Product(alen, a, blen, b, *h);
+	}
 
 
-inline expansion expansion::operator+(const expansion& e) const {
-	expansion r(pool->next);
-	assert(len + e.len + getPoolSize() < EXPANSION_POOL_SIZE);
-	r.resize(expansionObject::Gen_Sum((int)len, els, (int)e.len, e.els, r.els));
-	return r;
-}
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
+	//
+	// FUNCTION IMPLEMENTATIONS - EXPANSION INTERFACE
+	//
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline expansion expansion::operator-(const expansion& e) const {
-	expansion r(pool->next);
-	assert(len + e.len + getPoolSize() < EXPANSION_POOL_SIZE);
-	r.resize(expansionObject::Gen_Diff((int)len, els, (int)e.len, e.els, r.els));
-	return r;
-}
 
-inline expansion expansion::operator*(const expansion& e) const {
-	expansion r(pool->next);
-	assert(len * e.len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
-	r.resize(expansionObject::Gen_Product((int)len, els, (int)e.len, e.els, r.els));
-	return r;
-}
+	inline expansion expansion::operator+(const expansion& e) const {
+		expansion r(pool->next);
+		assert(len + e.len + getPoolSize() < EXPANSION_POOL_SIZE);
+		r.resize(expansionObject::Gen_Sum((int)len, els, (int)e.len, e.els, r.els));
+		return r;
+	}
 
-inline expansion expansion::operator-(const double d) const {
-	expansion r(pool->next);
-	assert(len + 1 + getPoolSize() < EXPANSION_POOL_SIZE);
-	r.resize(expansionObject::Gen_Diff((int)len, els, 1, &d, r.els));
-	return r;
-}
+	inline expansion expansion::operator-(const expansion& e) const {
+		expansion r(pool->next);
+		assert(len + e.len + getPoolSize() < EXPANSION_POOL_SIZE);
+		r.resize(expansionObject::Gen_Diff((int)len, els, (int)e.len, e.els, r.els));
+		return r;
+	}
 
-inline expansion expansion::operator*(const double& d) const {
-	expansion r(pool->next);
-	assert(len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
-	r.resize(expansionObject::Gen_Scale((int)len, els, d, r.els));
-	return r;
-}
+	inline expansion expansion::operator*(const expansion& e) const {
+		expansion r(pool->next);
+		assert(len * e.len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
+		r.resize(expansionObject::Gen_Product((int)len, els, (int)e.len, e.els, r.els));
+		return r;
+	}
 
-inline void expansion::operator=(const double d) {
-	assert(1 + getPoolSize() < EXPANSION_POOL_SIZE);
-	els = pool->next++;
-	len = 1;
-	*els = d;
-}
+	inline expansion expansion::operator-(const double d) const {
+		expansion r(pool->next);
+		assert(len + 1 + getPoolSize() < EXPANSION_POOL_SIZE);
+		r.resize(expansionObject::Gen_Diff((int)len, els, 1, &d, r.els));
+		return r;
+	}
 
-inline expansion expansion::sqr() const {
-	expansion r(pool->next);
-	assert(len * len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
-	r.resize(expansionObject::Gen_Square((int)len, els, r.els));
-	return r;
-}
+	inline expansion expansion::operator*(const double& d) const {
+		expansion r(pool->next);
+		assert(len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
+		r.resize(expansionObject::Gen_Scale((int)len, els, d, r.els));
+		return r;
+	}
 
-inline expansion::expansion(size_t s) : els(pool->next), len(s) {
-	assert(s + getPoolSize() < EXPANSION_POOL_SIZE);
-	pool->next += s;
-}
+	inline void expansion::operator=(const double d) {
+		assert(1 + getPoolSize() < EXPANSION_POOL_SIZE);
+		els = pool->next++;
+		len = 1;
+		*els = d;
+	}
 
-inline void expansion::resize(size_t l) {
-	assert(l + getPoolSize() < EXPANSION_POOL_SIZE);
-	len = l; pool->next += l;
-}
+	inline expansion expansion::sqr() const {
+		expansion r(pool->next);
+		assert(len * len * 2 + getPoolSize() < EXPANSION_POOL_SIZE);
+		r.resize(expansionObject::Gen_Square((int)len, els, r.els));
+		return r;
+	}
 
-inline std::ostream& operator<<(std::ostream& os, const expansion& p)
-{
-	for (size_t i = 0; i < p.len; i++) os << (i ? " " : "") << p.els[i];
-	return os;
-}
+	inline expansion::expansion(size_t s) : els(pool->next), len(s) {
+		assert(s + getPoolSize() < EXPANSION_POOL_SIZE);
+		pool->next += s;
+	}
 
-inline int sgn(const expansion& e) {
-	const double d = e.get_d();
-	return (d > 0) - (d < 0);
-}
+	inline void expansion::resize(size_t l) {
+		assert(l + getPoolSize() < EXPANSION_POOL_SIZE);
+		len = l; pool->next += l;
+	}
 
-inline expansion s_expansion::operator+(const s_expansion& e) const {
-	expansion r((uint64_t)2);
-	expansionObject::Two_Sum(val, e.val, r.els[1], r.els[0]);
-	return r;
-}
+	inline std::ostream& operator<<(std::ostream& os, const expansion& p)
+	{
+		for (size_t i = 0; i < p.len; i++) os << (i ? " " : "") << p.els[i];
+		return os;
+	}
 
-inline expansion s_expansion::operator-(const s_expansion& e) const {
-	expansion r((uint64_t)2);
-	expansionObject::Two_Diff(val, e.val, r.els[1], r.els[0]);
-	return r;
-}
+	inline int sgn(const expansion& e) {
+		const double d = e.get_d();
+		return (d > 0) - (d < 0);
+	}
 
-inline expansion s_expansion::operator*(const s_expansion& e) const {
-	expansion r((uint64_t)2);
-	expansionObject::Two_Prod(val, e.val, r.els[1], r.els[0]);
-	return r;
-}
+	inline expansion s_expansion::operator+(const s_expansion& e) const {
+		expansion r((uint64_t)2);
+		expansionObject::Two_Sum(val, e.val, r.els[1], r.els[0]);
+		return r;
+	}
 
-inline expansion s_expansion::operator*(const expansion& e) const {
-	return e * (*this);
-}
+	inline expansion s_expansion::operator-(const s_expansion& e) const {
+		expansion r((uint64_t)2);
+		expansionObject::Two_Diff(val, e.val, r.els[1], r.els[0]);
+		return r;
+	}
 
-inline expansion operator-(const double& d, const s_expansion& e) {
-	expansion r = e - s_expansion(d);
-	r.negate();
-	return r;
-}
+	inline expansion s_expansion::operator*(const s_expansion& e) const {
+		expansion r((uint64_t)2);
+		expansionObject::Two_Prod(val, e.val, r.els[1], r.els[0]);
+		return r;
+	}
 
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// FUNCTION IMPLEMENTATIONS - BIGNATURAL
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
+	inline expansion s_expansion::operator*(const expansion& e) const {
+		return e * (*this);
+	}
+
+	inline expansion operator-(const double& d, const s_expansion& e) {
+		expansion r = e - s_expansion(d);
+		r.negate();
+		return r;
+	}
+
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
+	//
+	// FUNCTION IMPLEMENTATIONS - BIGNATURAL
+	//
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #ifndef USE_GNU_GMP_CLASSES
 
-inline uint64_t* bignatural::BN_ALLOC(uint32_t num_bytes) { return (uint64_t*)nfgMemoryPool.alloc(num_bytes); }
-inline void bignatural::BN_FREE(uint64_t* ptr) { nfgMemoryPool.release(ptr); }
-inline bignatural::bignatural() : m_capacity(0), m_size(0), digits(NULL) { }
-inline bignatural::~bignatural() { BN_FREE(digits); }
-inline bignatural::bignatural(const bignatural& m) { init(m); }
-inline bignatural::bignatural(bignatural&& m) noexcept : m_capacity(m.m_capacity), m_size(m.m_size), digits(m.digits) {
-	m.digits = nullptr;
-	m.m_size = m.m_capacity = 0;
-}
-
-inline bignatural::bignatural(uint32_t m) { init(m); }
-
-inline bignatural::bignatural(uint64_t m) { init(m); }
-
-inline bignatural::bignatural(const char *s) { init(s); }
-
-inline bignatural::bignatural(FILE* f) { init(f); }
-
-inline const uint64_t& bignatural::back() const { return digits[m_size - 1]; }
-
-inline const uint64_t& bignatural::operator[](int i) const { return digits[i]; }
-
-inline uint32_t bignatural::size() const { return m_size; }
-
-inline bool bignatural::empty() const { return m_size == 0; }
-
-inline bignatural bignatural::operator<<(uint32_t n) const { bignatural t(*this); t <<= n; return t; }
-
-inline bignatural bignatural::operator>>(uint32_t n) const { bignatural t(*this); t >>= n; return t; }
-
-inline bool bignatural::operator<=(const bignatural& b) const { return b >= *this; }
-inline bool bignatural::operator<(const bignatural& b) const { return b > *this; }
-
-inline bignatural bignatural::operator+(const bignatural& b) const { bignatural n(*this); return (n += b); };
-inline bignatural bignatural::operator+(const uint32_t b) const { bignatural n(*this); return (n += b); }
-inline bignatural bignatural::operator+(const uint64_t b) const { return operator+(bignatural(b)); }
-
-inline bignatural bignatural::operator-(const bignatural& b) const { bignatural n(*this); return (n -= b); };
-
-inline bignatural& bignatural::operator*=(const bignatural& b) { operator=(*this * b); return *this; }
-
-inline void bignatural::operator|=(uint64_t i) { if (m_size) digits[m_size - 1] |= i; else operator=(i); }
-
-inline uint64_t& bignatural::back() { return digits[m_size - 1]; }
-
-inline void bignatural::pop_back() { m_size--; }
-
-inline uint64_t& bignatural::operator[](int i) { return digits[i]; }
-
-inline void bignatural::reserve(uint32_t n) { if (n > m_capacity) increaseCapacity(n); }
-
-inline void bignatural::resize(uint32_t n) { reserve(n); m_size = n; }
-
-inline void bignatural::fill(uint64_t v) {
-	uint64_t *dend = digits + m_size;
-	while (--dend >= digits) *dend = v;
-}
-
-inline uint32_t bignatural::countEndingZeroesLSL() const {
-	return (uint32_t)nfg_count_rz(back());
-}
-
-inline void bignatural::init(FILE* fp) {
-	char s[2048]; // Can read up to 2047 decimal digits from file
-	size_t i = 0;
-	int c = EOF;
-	while (i < sizeof(s) - 1 && (c = fgetc(fp)) != EOF && isdigit((unsigned char)c)) {
-		s[i++] = (char)c;
-	}
-	if (c != EOF) ungetc(c, fp);
-	s[i] = 0;
-	init(s);
-}
-
-inline size_t bignatural::scan_uint64_t(const char *s, uint64_t& t) {
-	const uint64_t limit_n = UINT64_MAX / 10 - 1;
-	uint64_t n = 0;
-	size_t i = 0;
-
-	int c = s[i];
-	while (isdigit(c) && n <= limit_n) {
-		n *= 10;
-		n += (c - '0');
-		c = s[++i];
-	}
-
-	t = n;
-	return i;
-}
-
-inline void bignatural::init(const char *s) {
-	m_size = m_capacity = 0;
-	digits = NULL;
-
-	uint64_t n;
-	size_t r = 0;
-	while ((r = scan_uint64_t(s, n)) != 0) {
-		s += r;
-		while (r--) operator*=(10ULL);
-		operator+=(n);
-	}
-}
-
-inline void bignatural::init(const bignatural& m) {
-	m_size = m.m_size;
-	m_capacity = m.m_capacity;
-	if (m_capacity) {
-		digits = BN_ALLOC(sizeof(uint64_t) * m_capacity);
-		if (m_size) memcpy(digits, m.digits, sizeof(uint64_t) * m_size);
-	}
-	else digits = NULL;
-}
-
-inline void bignatural::init(const uint64_t m) {
-	if (m == 0) {
-		m_size = m_capacity = 0;
-		digits = NULL;
-	}
-	else {
-		m_size = m_capacity = 1;
-		digits = BN_ALLOC(sizeof(uint64_t));
-		digits[0] = m;
-	}
-}
-
-inline void bignatural::init(const uint32_t m) {
-	init((uint64_t)m);
-}
-
-inline bool bignatural::toUint64(uint64_t& n) const {
-	if (m_size == 0) n = 0;
-	else if (m_size == 1) n = digits[0];
-	else return false;
-
-	return true;
-}
-
-inline bignatural& bignatural::operator=(const bignatural& m) {
-	if (digits != m.digits) {
-		if (m_capacity >= m.m_size) {
-			m_size = m.m_size;
-			if (m_size) memcpy(digits, m.digits, sizeof(uint64_t) * m_size);
-		}
-		else {
-			BN_FREE(digits);
-			init(m);
-		}
-	}
-
-	return *this;
-}
-
-inline bignatural& bignatural::operator=(const uint64_t m) {
-	BN_FREE(digits);
-	init(m);
-	return *this;
-}
-
-inline void bignatural::operator<<=(uint32_t n) {
-	if (m_size == 0) return;
-	leftShift(n);
-}
-
-inline void bignatural::leftShift(uint32_t n) {
-	uint32_t s = n & 63U;
-	uint32_t lz = countLeadingZeroes();
-	uint32_t s2 = 64 - s;
-
-	if (lz < s) { // Need a further limb
-		push_back(0);
-		auto de = digits + m_size;
-		while (digits != --de) {
-			*de >>= s2;
-			*de |= ((*(de - 1)) << s);
-		}
-		*de >>= s2;
-	}
-	else if (s) { // Leading zeroes are enough
-		auto dp = digits, de = digits + m_size - 1;
-		while (dp != de) {
-			*dp <<= s;
-			*dp |= ((*(dp + 1)) >> s2);
-			dp++;
-		}
-		*dp <<= s;
-	}
-
-	while (n >= 64) {
-		push_back(0);
-		n -= 64;
-	}
-}
-
-inline void bignatural::operator>>=(uint32_t n) {
-	if ((n >> 6) >= m_size) {
-		m_size = 0;
-		return;
-	}
-
-	while (n >= 64) {
-		pop_back();
-		n -= 64;
-	}
-	if (!n) return;
-
-	auto dp = digits, de = digits + m_size;
-	while (dp != --de) {
-		*de >>= n;
-		*de |= ((*(de - 1)) << (64 - n));
-	}
-	if ((*de >>= n) == 0) pop_front();
-}
-
-inline bool bignatural::operator==(const bignatural& b) const {
-	if (size() != b.size()) return false;
-	auto dp = digits, de = digits + m_size, db = b.digits;
-	while (dp != de && *dp == *db) { dp++; db++; }
-	return (dp == de);
-}
-
-inline bool bignatural::operator!=(const bignatural& b) const {
-	if (size() != b.size()) return true;
-	auto dp = digits, de = digits + m_size, db = b.digits;
-	while (dp != de && *dp == *db) { dp++; db++; }
-	return (dp != de);
-}
-
-inline bool bignatural::operator>=(const bignatural& b) const {
-	const int s = (size() > b.size()) - (size() < b.size());
-	if (s) return (s > 0);
-
-	auto dp = digits, de = digits + m_size, db = b.digits;
-	while (dp != de && *dp == *db) { dp++; db++; }
-	return (dp == de || *dp > *db);
-}
-
-inline bool bignatural::operator>(const bignatural& b) const {
-	const int s = (size() > b.size()) - (size() < b.size());
-	if (s) return (s > 0);
-
-	auto dp = digits, de = digits + m_size, db = b.digits;
-	while (dp != de && *dp == *db) { dp++; db++; }
-	return (dp != de && *dp > *db);
-}
-
-inline bignatural bignatural::operator*(const bignatural& b) const {
-	bignatural result;
-	result.toProd(*this, b);
-	return result;
-}
-
-inline bignatural bignatural::operator|(const bignatural& b) const {
-	bignatural result;
-
-	if (m_size >= b.size()) {
-		result = *this;
-		uint64_t* rd = result.digits + m_size;
-		uint64_t* bd = b.digits + b.m_size;
-		do { *--rd |= *--bd; } while (bd != b.digits);
-	}
-	else {
-		result = b;
-		uint64_t* rd = result.digits + m_size;
-		uint64_t* bd = b.digits + b.m_size;
-		do { *--rd |= *--bd; } while (rd != result.digits);
-	}
-
-	return result;
-}
-
-inline bignatural bignatural::divide_by(const uint64_t D, uint64_t& remainder) const {
-	assert(D != 0);
-
-	// If possible, use hardware division
-	uint64_t n;
-	if (toUint64(n)) {
-		remainder = n % D;
-		return n / D;
-	}
-
-	bignatural Q;
-	Q.reserve(m_size);
-	uint64_t rem = 0;
-
-	for (size_t next_digit = 0; next_digit < m_size; next_digit++) {
-		uint64_t q_digit = _nfg_div_with_rem(rem, digits[next_digit], D);
-		if (!Q.empty() || q_digit) Q.push_back(q_digit);
-	}
-	remainder = rem;
-
-	return Q;
-}
-
-// Short division (assumes no remainder)
-inline bignatural bignatural::divide_by_exact(const uint64_t D) const {
-	assert(D != 0);
-
-	// If possible, use hardware division
-	uint64_t n;
-	if (toUint64(n)) return n / D;
-
-	bignatural Q;
-	Q.reserve(m_size);
-	uint64_t rem = 0;
-
-	for (size_t next_digit = 0; next_digit < m_size; next_digit++) {
-		uint64_t q_digit = _nfg_div_with_rem(rem, digits[next_digit], D);
-		if (!Q.empty() || q_digit) Q.push_back(q_digit);
-	}
-	assert(rem == 0);
-
-	return Q;
-}
-
-inline uint32_t bignatural::getNumSignificantBits() const {
-	if (!m_size) return 0;
-	return (m_size * 64) - nfg_count_lz(digits[0]);
-}
-
-inline bool bignatural::getBit(uint32_t b) const {
-	const uint32_t dig = (m_size - (b >> 6)) - 1;
-	const uint32_t bit = b & 63;
-	return (digits[dig] & (UINT64_C(1) << bit));
-}
-
-// Long division
-inline bignatural bignatural::divide_by(const bignatural& divisor, bignatural& remainder) const {
-	if (divisor.empty()) ip_error("Division by zero\n");
-	if (empty()) return (uint32_t)0;
-
-	// If both dividend and divisor fit into 64 bits, use hardware division
-	uint64_t n, d;
-	if (toUint64(n) && divisor.toUint64(d)) {
-		remainder = n % d;
-		return n / d;
-	}
-
-	// If divisor fits into 64 bits, revert to short division
-	uint64_t d64, rem;
-	if (divisor.toUint64(d64)) {
-		bignatural q = divide_by(d64, rem);
-		remainder = rem;
-		return q;
-	}
-
-	// If divisor is greater than dividend...
-	if (divisor > *this) {
-		remainder = *this;
-		return (uint32_t)0;
-	}
-
-	// Use binary (per-bit) long division
-	const bignatural& dividend = *this;
-
-	bignatural quotient, loc_dividend;
-	quotient.reserve(m_size);
-	loc_dividend.reserve(m_size);
-	uint32_t next_dividend_bit = dividend.getNumSignificantBits();
-
-	do {
-		loc_dividend.push_bit_back(dividend.getBit(--next_dividend_bit));
-		if (loc_dividend >= divisor) {
-			loc_dividend -= divisor;
-			quotient.push_bit_back(1);
-		}
-		else if (!quotient.empty()) quotient.push_bit_back(0);
-	} while (next_dividend_bit);
-
-	remainder = loc_dividend;
-
-	return quotient;
-}
-
-// Exact long division (Barrett-Jebelean) - Assume remainder is zero
-inline bignatural bignatural::divide_by_exact(const bignatural& divisor) const {
-	if (empty()) return (uint64_t)0;
-
-	// If the divisor fits into 64 bits, use short division for 64-bit
-	uint64_t d64;
-	if (divisor.toUint64(d64)) return divide_by_exact(d64);
-
-	// If both dividend and divisor fit into 64 bits, use hardware division
-	uint64_t n64;
-	if (toUint64(n64)) return n64 / d64; // d64 has already been extracted above
-
-	bignatural A(*this), B(divisor);
-
-	// 1. Shift both A and B until B is odd
-	size_t az = A.countEndingZeroes();
-	size_t bz = B.countEndingZeroes();
-	size_t trailing_zeroes = std::min(az, bz);
-	A >>= (uint32_t)trailing_zeroes;
-	B >>= (uint32_t)trailing_zeroes;
-
-	// Number of limbs of B and A
-	size_t n = B.size();
-	size_t m = A.size();
-
-	if (m < n) return (uint64_t)0;
-
-	size_t q_size = m - n + 1;
-	bignatural Q;
-	Q.resize((uint32_t)q_size); // Direct initialization to zero
-	Q.fillWithZeroes();
-
-	// 2. Compute the modular inverse of the least significant limb of B modulo 2^64
-	// In Big Endian the least significant limb is the limb at the back
-	uint64_t b = B.back();
-	uint64_t v = (3 * b) ^ 2; // Initial approximation to 4 bits
-	v *= (2 - b * v); // 8 bits
-	v *= (2 - b * v); // 16 bits
-	v *= (2 - b * v); // 32 bits
-	v *= (2 - b * v); // 64 bits of precision for 64-bit limb
-	// 3. Jebelean's main loop (Right-to-Left)
-	for (size_t i = 0; i < q_size; ++i) {
-		// Index of the current limb of A starting from the right (Big Endian)
-		size_t a_idx = m - 1 - i;
-
-		if (A[(int)a_idx] == 0) {
-			Q[(int)(q_size - 1 - i)] = 0;
-		}
-		else {
-			// Compute the i-th limb of the quotient
-			uint64_t q_i = A[(int)a_idx] * v;
-			Q[(int)(q_size - 1 - i)] = q_i;
-
-			uint64_t carry = 0;
-			uint64_t borrow = 0;
-
-			for (size_t j = 0; j < n; ++j) {
-				size_t b_idx = n - 1 - j;
-				size_t target_idx = m - 1 - i - j;
-
-				// 128-bit multiplication: prod_hi:prod_lo = q_i * B[b_idx] + carry
-				uint64_t prod_lo = _nfg_mul_with_carry(q_i, B[(int)b_idx], carry);
-
-				// Subtraction with borrow: A[target_idx] - prod_lo - borrow
-				uint64_t cur_a = A[(int)target_idx];
-				uint64_t sub = prod_lo + borrow;
-				uint64_t new_borrow = (sub < prod_lo) || (cur_a < sub) ? 1 : 0;
-
-				A[(int)target_idx] = cur_a - sub;
-				borrow = new_borrow;
-			}
-
-			// Propagation of remaining carry and borrow to the left
-			size_t k = i + n;
-			while ((carry > 0 || borrow > 0) && k < m) {
-				size_t k_idx = m - 1 - k;
-				uint64_t cur_a = A[(int)k_idx];
-				uint64_t sub = carry + borrow;
-
-				borrow = (cur_a < sub) ? 1 : 0;
-				A[(int)k_idx] = cur_a - sub;
-				carry = 0;
-				k++;
-			}
-		}
-	}
-
-	Q.pack();
-
-	return Q;
-}
-
-inline bignatural bignatural::sqrt() const
-{
-	bignatural low, tmp, high = *this, mid = *this;
-
-	mid >>= 1U;
-	mid += 1U;
-
-	while (high > low)
-	{
-		if (mid * mid > *this) {
-			high = mid - 1U;
-			tmp = low + 1U;
-			mid -= tmp;
-			mid >>= 1;
-			mid += tmp;
-		}
-		else {
-			low = mid;
-			mid = high - low;
-			mid >>= 1;
-			mid += (low + 1U);
-		}
-	}
-
-	return low;
-}
-
-inline void bignatural::increaseCapacity(uint32_t new_capacity) {
-	m_capacity = new_capacity;
-	uint64_t* tmp_d = (uint64_t*)BN_ALLOC(sizeof(uint64_t) * m_capacity);
-	if (m_size) memcpy(tmp_d, digits, sizeof(uint64_t) * m_size);
-	BN_FREE(digits);
-	digits = tmp_d;
-}
-
-// Add one most significant digit to this number and make room for it if necessary
-inline void bignatural::addOneMostSignificantDigit(uint64_t d) {
-	if (m_capacity == m_size) {
-		m_capacity++;
-		uint64_t* tmp_d = (uint64_t*)BN_ALLOC(sizeof(uint64_t) * m_capacity);
-		if (m_size) memcpy(tmp_d + 1, digits, sizeof(uint64_t) * m_size);
-		BN_FREE(digits);
-		digits = tmp_d;
-		digits[0] = d;
-	}
-	else { // m_capacity > m_size
-		uint64_t* td = digits + m_size;
-		while (--td != digits) *(td + 1) = *td;
-		*(td + 1) = *td;
-		*td = d;
-	}
-	m_size++;
-}
-
-// Binary GCD (Stein's Algorithm)
-inline bignatural bignatural::GCD(const bignatural& B) const {
-	if (empty()) return B;
-	if (B.empty()) return *this;
-	return GCD_non_zero(B);
-}
-
-// Co-primality check
-inline bool bignatural::coprime(const bignatural& B) const {
-	if (empty() || B.empty()) return true;
-	if (!(back() & (1UL)) && !(B.back() & (1UL))) return false; // Both numbers are even
-	return GCD_non_zero(B).isOne();
-}
-
-inline bignatural bignatural::GCD_non_zero(const bignatural& B) const {
-	bignatural a = (*this), b = B;
-
-	uint32_t az = a.countEndingZeroes();
-	uint32_t bz = b.countEndingZeroes();
-	uint32_t k = std::min(az, bz);
-
-	a >>= (az > bz) ? (az) : (k);
-	b >>= k;
-
-	bignatural* ap = &a;
-	bignatural* bp = &b;
-	do {
-		(*bp) >>= bp->countEndingZeroes();
-		if ((*ap) > (*bp)) std::swap(ap, bp);
-		(*bp) -= (*ap);
-	} while (!bp->empty());
-
-	(*ap) <<= k;
-	return (*ap);
-}
-
-// String representation in decimal form
-inline std::string bignatural::get_dec_str() const {
-	std::string st;
-	bignatural N = *this;
-	uint64_t R;
-	if (N.empty()) return "0";
-	while (!N.empty()) {
-		N = N.divide_by(10, R);
-		st += ('0' + (char)R);
-	}
-	std::reverse(st.begin(), st.end());
-
-	return st;
-}
-
-// String representation in binary form
-inline std::string bignatural::get_str() const {
-	std::string st;
-	char s[65];
-	s[64] = 0;
-	for (uint32_t j = 0; j < m_size; j++) {
-		for (int i = 0; i < 64; i++)
-			s[i] = (digits[j] & (UINT64_C(1) << (63 - i))) ? '1' : '0';
-		st += s;
-	}
-	return st;
-}
-
-// Count number of zeroes on the right (least significant binary digits)
-inline uint32_t bignatural::countEndingZeroes() const {
-	if (m_size == 0) return 0;
-	uint32_t i = m_size;
-	uint32_t shft = 0;
-	while (!digits[--i])  shft += 64;
-
-	return shft + nfg_count_rz(digits[i]);
-}
-
-inline uint32_t bignatural::countLeadingZeroes() const {
-	return (uint32_t)nfg_count_lz(digits[0]);
-}
-
-inline void bignatural::toSum(const bignatural& a, const bignatural& b) {
-	operator=(a);
-	operator+=(b);
-}
-
-inline bignatural& bignatural::operator+=(const bignatural& b) {
-	if (m_size == 0) return operator=(b);
-	else if (&b == this) { // If b is this same number just multiply by two
-		operator<<=(1U);
-	}
-	else if (b.m_size != 0) {
-		const uint32_t a_s = m_size;
-		const uint32_t b_s = b.m_size;
-		unsigned char carry = 0;
-		uint64_t* __restrict dig_b = b.digits + b_s;
-
-		if (a_s > b_s) {
-			uint64_t* __restrict dig_a = digits + a_s;
-			do {
-				dig_a--; dig_b--;
-				carry = _nfg_add_with_carry(carry, *dig_a, *dig_b, dig_a);
-			} while (dig_b != b.digits);
-			do {
-				dig_a--;
-				carry = _nfg_add_with_carry(carry, *dig_a, 0, dig_a);
-			} while (dig_a != digits);
-		}
-		else if (a_s == b_s) {
-			uint64_t* __restrict dig_a = digits + a_s;
-			do {
-				dig_a--; dig_b--;
-				carry = _nfg_add_with_carry(carry, *dig_a, *dig_b, dig_a);
-			} while (dig_b != b.digits);
-		}
-		else { // if (a_s < b_s)
-			reserve(b_s + 1); // This might be a bit wasteful, but avoids a second allocation in case of carry
-			m_size = b_s;
-			uint64_t* __restrict dig_a = digits + a_s;
-			uint64_t* __restrict dig_r = digits + b_s;
-			do {
-				dig_a--; dig_b--; dig_r--;
-				carry = _nfg_add_with_carry(carry, *dig_a, *dig_b, dig_r);
-			} while (dig_a != digits);
-			do {
-				dig_b--; dig_r--;
-				carry = _nfg_add_with_carry(carry, 0, *dig_b, dig_r);
-			} while (dig_b != b.digits);
-		}
-
-		if (carry) addOneMostSignificantDigit((uint64_t)carry);
-	}
-
-	return *this;
-}
-
-inline void bignatural::toDiff(const bignatural& a, const bignatural& b) {
-	operator=(a);
-	operator-=(b);
-}
-
-inline bignatural& bignatural::operator-=(const bignatural& b) {
-	assert(operator>=(b));
-
-	if (b.m_size) {
-		uint64_t da, db, borrow = 0;
-		uint64_t* dig_a = digits + m_size;
-		const uint64_t* dig_b = b.digits + b.m_size;
-
-		do {
-			da = *(--dig_a);
-			uint64_t digit_b = *(--dig_b);
-			db = digit_b + borrow;
-			borrow = (db < digit_b) || (da < db);
-			*(dig_a) = da - db;
-		} while (dig_b != b.digits);
-
-		while (dig_a != digits) {
-			da = *(--dig_a);
-			db = borrow;
-			borrow = (da < db);
-			*(dig_a) = da - db;
-		}
-
-		pack();
-	}
-
-	return *this;
-}
-
-inline void bignatural::toProd(const bignatural& a, const bignatural& b) {
-	assert(m_size == 0 && m_capacity == 0); // This assumes that the number is zero!
-	const uint32_t N = a.size(), M = b.size();
-	if (N && M) {
-		m_size = m_capacity = (N+M);
-		digits = (uint64_t*)BN_ALLOC(sizeof(uint64_t) * m_capacity);
-
-// Uses O(N*M) multiplication. This is the best choice for not-too-large factors
-// Consider implementing Karatsuba's algorithm for larger numbers
+// Set out = a + b + carry and return 1 if overflow occurs (i.e. if sum exceeds 64 bits)
+	inline uint8_t _nfg_add_with_carry(uint8_t carry, uint64_t a, uint64_t b, uint64_t* out) {
 #if defined(_MSC_VER) && defined(USE_AVX2_INSTRUCTIONS)
-		// Urdhva Tiryagbhyam multiplication algorithm (vertical and crosswise)
-		uint64_t acc_lo = 0, acc_hi = 0, acc_extra = 0;
+		// 1. MSVC (x64 / ARM64): Uses hardware intrinsic directly
+		return _addcarry_u64(carry, a, b, reinterpret_cast<unsigned __int64*>(out));
 
-		uint32_t kM = N - 1;
-		for (uint32_t k = kM + M; k >= 1; --k, --kM) {
-			uint32_t start_i = (k > M) ? (kM) : 0;
-			uint32_t end_i = (k < N) ? (k) : (N);
-			uint32_t j = k - start_i - 1;
-			for (uint32_t i = start_i; i < end_i; ++i, j--) {
-				uint64_t p_hi;
-				uint64_t p_lo = _umul128(a[i], b[j], &p_hi);
-				uint8_t carry = _nfg_add_with_carry(0, acc_lo, p_lo, &acc_lo);
-				acc_extra += _nfg_add_with_carry(carry, acc_hi, p_hi, &acc_hi);
-			}
-			digits[k] = acc_lo;
-
-			acc_lo = acc_hi;
-			acc_hi = acc_extra;
-			acc_extra = 0;
-		}
-		if (acc_lo)  digits[0] = acc_lo;
-		else memmove(digits, digits + 1, sizeof(uint64_t) * (--m_size));
+#elif defined(__clang__) && defined(__has_builtin) 
+#if __has_builtin(__builtin_addcll)
+		// 2. Clang (x86/x64, ARM64, RISC-V): Clang's architecture-agnostic builtin
+		unsigned long long carry_out = 0;
+		*out = __builtin_addcll(a, b, carry, &carry_out);
+		return static_cast<uint8_t>(carry_out);
+#endif
 #elif defined(__SIZEOF_INT128__)
-		// Urdhva Tiryagbhyam multiplication algorithm (vertical and crosswise)
-		__uint128_t acc = 0;
-		uint64_t acc_extra = 0;
-
-		uint32_t kM = N - 1;
-		for (uint32_t k = kM + M; k >= 1; --k, --kM) {
-			uint32_t start_i = (k > M) ? (kM) : 0;
-			uint32_t end_i = (k < N) ? (k) : (N);
-			uint32_t j = k - start_i - 1;
-
-			for (uint32_t i = start_i; i < end_i; ++i, j--) {
-				__uint128_t prod = (__uint128_t)a[i] * b[j];
-				acc += prod;
-				if (acc < prod) acc_extra++;
-			}
-			digits[k] = (uint64_t)acc;
-
-			acc = (acc >> 64) | ((__uint128_t)acc_extra << 64);
-			acc_extra = 0;
-		}
-		if (acc != 0)  digits[0] = (uint64_t)acc;
-		else memmove(digits, digits + 1, sizeof(uint64_t) * (--m_size));
+		// 3. GCC / Clang (64-bit platforms): Optimal code generation via 128-bit integer
+		unsigned __int128 sum = static_cast<unsigned __int128>(a) + b + carry;
+		*out = static_cast<uint64_t>(sum);
+		return static_cast<uint8_t>(sum >> 64);
 #else
-		// Naive schoolbook multiplication
-		memset(digits, 0, m_size * sizeof(uint64_t));
-		uint32_t ls = 0;
-		for (uint64_t* d = b.digits + b.m_size; d != b.digits;) a.addmul(*(--d), ls++, *this);
+		// 5. Pure C++ Standard Fallback (ARM32, WebAssembly, 32-bit platforms)
+		uint64_t sum1 = a + b;
+		uint8_t c1 = (sum1 < a) ? 1 : 0;
 
-		if (digits[0] == 0) memmove(digits, digits + 1, sizeof(uint64_t) * (--m_size));
+		uint64_t sum2 = sum1 + carry;
+		uint8_t c2 = (sum2 < sum1) ? 1 : 0;
+
+		*out = sum2;
+		return c1 | c2;
 #endif
 	}
-}
 
-inline void bignatural::addmul(uint64_t b, uint32_t left_shifts, bignatural& result) const {
-	const uint64_t* __restrict dp = digits + m_size;
-	uint64_t* __restrict rp = result.digits + result.m_size - left_shifts;
+	// Return the low 64 bits of the 64x64 bit expression a*b+carry and set carry to the high 64bit
+	inline uint64_t _nfg_mul_with_carry(uint64_t a, uint64_t b, uint64_t& carry) {
+		uint64_t prod_hi;
+#if defined(_MSC_VER) && !defined(__clang__) && defined(USE_AVX2_INSTRUCTIONS)
+		uint64_t prod_lo = _umul128(a, b, &prod_hi);
+		prod_lo += carry;
+		if (prod_lo < carry) prod_hi++;
+#elif defined(__SIZEOF_INT128__)
+		unsigned __int128 prod = (unsigned __int128)a * b + carry;
+		uint64_t prod_lo = (uint64_t)prod;
+		prod_hi = (uint64_t)(prod >> 64);
+#else
+		uint64_t a_lo = static_cast<uint32_t>(a), a_hi = a >> 32;
+		uint64_t b_lo = static_cast<uint32_t>(b), b_hi = b >> 32;
+		uint64_t c_lo = static_cast<uint32_t>(carry), c_hi = carry >> 32;
 
-	uint64_t hi, lo, pm = 0;
-	while (dp != digits) {
-		dp--; rp--;
-		hi = 0;
-		lo = _nfg_mul_with_carry(*dp, b, hi);
-		hi += _nfg_add_with_carry(0, *rp, lo, rp);
-		hi += _nfg_add_with_carry(0, *rp, pm, rp);
-		pm = hi;
+		uint64_t p0 = a_lo * b_lo;
+		uint64_t p1 = a_lo * b_hi;
+		uint64_t p2 = a_hi * b_lo;
+		uint64_t p3 = a_hi * b_hi;
+
+		uint64_t s0 = static_cast<uint32_t>(p0) + c_lo;
+		uint64_t s1 = (p0 >> 32) + static_cast<uint32_t>(p1) + static_cast<uint32_t>(p2) + c_hi + (s0 >> 32);
+		uint64_t prod_lo = (s1 << 32) | static_cast<uint32_t>(s0);
+		prod_hi = p3 + (p1 >> 32) + (p2 >> 32) + (s1 >> 32);
+#endif
+		carry = prod_hi;
+		return prod_lo;
 	}
 
-	*(--rp) = pm;
-}
+	// Return (dig+(rem<<64))/D and set rem = (dig+(rem<<64))%D 
+	inline uint64_t _nfg_div_with_rem(uint64_t& rem, uint64_t dig, uint64_t D) {
+#if defined(_MSC_VER) && !defined(__clang__) && defined(USE_AVX2_INSTRUCTIONS)
+		return _udiv128(rem, dig, D, &rem);
+#elif defined(__SIZEOF_INT128__) && defined(_MSC_VER) // CLang on MSVC has neither _udiv128 nor 128bit division. Use ASM.
+		uint64_t q;
+		__asm__("divq %4"
+			: "=a"(q), "=d"(rem)
+			: "a"(dig), "d"(rem), "r"(D)
+			: "cc");
+		return q;
+#elif defined(__SIZEOF_INT128__) && !defined(_MSC_VER)
+		unsigned __int128 cur = ((unsigned __int128)rem << 64) | dig;
+		rem = (uint64_t)(cur % D);
+		return (uint64_t)(cur / D);
+#else
+		// First half of the limb (upper 32 bits)
+		uint64_t cur = (rem << 32) | (dig >> 32);
+		uint64_t q_hi = cur / D;
+		rem = cur % D;
 
-inline void bignatural::push_back(uint64_t b) {
-	if (m_size == m_capacity) increaseCapacity((m_capacity | 1) << 2);
-	digits[m_size++] = b;
-}
+		// Second half of the limb (lower 32 bits)
+		cur = (rem << 32) | (uint32_t)dig;
+		uint64_t q_lo = cur / D;
+		rem = cur % D;
 
-inline void bignatural::push_bit_back(uint32_t b) {
-	if (m_size) {
-		leftShift(1);
-		back() |= b;
+		return (q_hi << 32) | q_lo;
+#endif
 	}
-	else if (b) push_back(1);
-}
 
-inline void bignatural::pop_front() {
-	uint64_t* d = digits, * de = digits + m_size;
-	while (++d != de) *(d - 1) = *d;
-	pop_back();
-}
+	inline uint64_t* bignatural::BN_ALLOC(uint32_t num_bytes) { return (uint64_t*)nfgMemoryPool.alloc(num_bytes); }
+	inline void bignatural::BN_FREE(uint64_t* ptr) { nfgMemoryPool.release(ptr); }
+	inline bignatural::bignatural() : m_capacity(0), m_size(0), digits(NULL) {}
+	inline bignatural::~bignatural() { BN_FREE(digits); }
+	inline bignatural::bignatural(const bignatural& m) { init(m); }
+	inline bignatural::bignatural(bignatural&& m) noexcept : m_capacity(m.m_capacity), m_size(m.m_size), digits(m.digits) {
+		m.digits = nullptr;
+		m.m_size = m.m_capacity = 0;
+	}
 
-inline void bignatural::pack() {
-	uint32_t i = 0;
-	while (i < m_size && digits[i] == 0) i++;
+	inline bignatural::bignatural(uint32_t m) { init(m); }
 
-	if (i) {
-		uint64_t* dold = digits + i;
-		uint64_t* dnew = digits;
+	inline bignatural::bignatural(uint64_t m) { init(m); }
+
+	inline bignatural::bignatural(const char* s) { init(s); }
+
+	inline bignatural::bignatural(FILE* f) { init(f); }
+
+	inline const uint64_t& bignatural::back() const { return digits[m_size - 1]; }
+
+	inline const uint64_t& bignatural::operator[](int i) const { return digits[i]; }
+
+	inline uint32_t bignatural::size() const { return m_size; }
+
+	inline bool bignatural::empty() const { return m_size == 0; }
+
+	inline bignatural bignatural::operator<<(uint32_t n) const { bignatural t(*this); t <<= n; return t; }
+
+	inline bignatural bignatural::operator>>(uint32_t n) const { bignatural t(*this); t >>= n; return t; }
+
+	inline bool bignatural::operator<=(const bignatural& b) const { return b >= *this; }
+	inline bool bignatural::operator<(const bignatural& b) const { return b > *this; }
+
+	inline bignatural bignatural::operator+(const bignatural& b) const { bignatural n(*this); return (n += b); };
+	inline bignatural bignatural::operator+(const uint32_t b) const { bignatural n(*this); return (n += b); }
+	inline bignatural bignatural::operator+(const uint64_t b) const { return operator+(bignatural(b)); }
+
+	inline bignatural bignatural::operator-(const bignatural& b) const { bignatural n(*this); return (n -= b); };
+
+	inline bignatural& bignatural::operator*=(const bignatural& b) { operator=(*this * b); return *this; }
+
+	inline void bignatural::operator|=(uint64_t i) { if (m_size) digits[m_size - 1] |= i; else operator=(i); }
+
+	inline uint64_t& bignatural::back() { return digits[m_size - 1]; }
+
+	inline void bignatural::pop_back() { m_size--; }
+
+	inline uint64_t& bignatural::operator[](int i) { return digits[i]; }
+
+	inline void bignatural::reserve(uint32_t n) { if (n > m_capacity) increaseCapacity(n); }
+
+	inline void bignatural::resize(uint32_t n) { reserve(n); m_size = n; }
+
+	inline void bignatural::fill(uint64_t v) {
 		uint64_t* dend = digits + m_size;
-		while (dold < dend) *dnew++ = *dold++;
-		m_size -= i;
+		while (--dend >= digits) *dend = v;
 	}
-}
 
+	inline uint32_t bignatural::countEndingZeroesLSL() const {
+		return (uint32_t)nfg_count_rz(back());
+	}
 
-inline bignatural& bignatural::operator+=(const uint32_t b) {
-	if (b != 0) {
-		if (m_size) {
-			uint64_t pm = digits[(int)(m_size - 1)] + b;
-			digits[(int)m_size - 1] = pm;
-			uint64_t carry = pm < b;
-			for (uint32_t i = m_size - 1; carry && i > 0; i--) {
-				pm = digits[(int)(i - 1)] + carry;
-				digits[(int)i - 1] = pm;
-				carry = (pm == 0);
-			}
-			if (carry) addOneMostSignificantDigit((uint32_t)carry);
+	inline void bignatural::init(FILE* fp) {
+		char s[2048]; // Can read up to 2047 decimal digits from file
+		size_t i = 0;
+		int c = EOF;
+		while (i < sizeof(s) - 1 && (c = fgetc(fp)) != EOF && isdigit((unsigned char)c)) {
+			s[i++] = (char)c;
 		}
-		else init(b);
-	}
-
-	return *this;
-}
-
-inline bignatural& bignatural::operator+=(const uint64_t b) {
-	if (b <= UINT32_MAX) return operator+=((uint32_t)b);
-	else return operator+=(bignatural(b));
-}
-
-inline bignatural& bignatural::operator*=(const uint64_t b) {
-	if (m_size) {
-		if (b == 0) return operator=(0U);
-		uint64_t* da = digits + m_size;
-		uint64_t carry = 0;
-		while (da != digits) {
-			--da;
-			uint64_t lo, hi=0;
-			lo = _nfg_mul_with_carry(*da, b, hi);
-			carry = hi + _nfg_add_with_carry(0, lo, carry, da);
-		}
-
-		if (carry) addOneMostSignificantDigit(carry);
-	}
-
-	return *this;
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// FUNCTION IMPLEMENTATIONS - BIGFLOAT
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-
-inline bigfloat::bigfloat() : exponent(0), sign(0) {}
-
-inline bigfloat::bigfloat(const bignatural& m, int32_t e, int32_t s) : mantissa(m), exponent(e), sign(s) {}
-
-inline int32_t bigfloat::log2() const { return exponent + ((int32_t)mantissa.getNumSignificantBits()) - 1; }
-
-inline void bigfloat::increaseMantissa() { mantissa += 1U; pack(); }
-
-inline bool bigfloat::operator==(const bigfloat& b) const { return (operator-(b).sign == 0); }
-
-inline bool bigfloat::operator!=(const bigfloat& b) const { return (operator-(b).sign != 0); }
-
-inline bool bigfloat::operator<(const bigfloat& b) const {
-	assert(0 && "This function must be tested!");
-
-	if (sign < b.sign) return true;
-	if (sign > b.sign) return false;
-	const int32_t na = exponent + mantissa.getNumSignificantBits();
-	const int32_t nb = b.exponent + b.mantissa.getNumSignificantBits();
-	if (sign >= 0) {
-		if (na < nb) return true;
-		else if (na > nb) return false;
-		else if (exponent < b.exponent) return mantissa < (b.mantissa << (b.exponent - exponent));
-		else if (exponent > b.exponent) return (mantissa << (exponent - b.exponent)) < b.mantissa;
-		else return mantissa < b.mantissa;
-	}
-	else {
-		if (na < nb) return false;
-		else if (na > nb) return true;
-		else if (exponent < b.exponent) return mantissa > (b.mantissa << (b.exponent - exponent));
-		else if (exponent > b.exponent) return (mantissa << (exponent - b.exponent)) > b.mantissa;
-		else return mantissa > b.mantissa;
-	}
-}
-
-inline bool bigfloat::operator>(const bigfloat& b) const {
-	return b.operator<(*this);
-}
-
-inline void bigfloat::invert() { sign = -sign; }
-
-inline int bigfloat::sgn() const { return sign; }
-
-inline const bignatural& bigfloat::getMantissa() const { return mantissa; }
-
-inline int32_t bigfloat::getExponent() const { return exponent; }
-
-inline void bigfloat::leftShift(uint32_t n) {
-	mantissa <<= n;
-	exponent -= n;
-}
-
-inline void bigfloat::rightShift(uint32_t n) {
-	mantissa >>= n;
-	exponent += n;
-}
-
-inline bigfloat::bigfloat(const double d) {
-	sign = (d > 0) - (d < 0);
-
-	if (sign) {
-		uint64_t dn = *((uint64_t*)(&d));
-		const uint64_t m = (dn & 0x000fffffffffffff) + 0x0010000000000000;
-		mantissa.push_back(m);
-		dn <<= 1;
-		dn >>= 53;
-		exponent = ((int32_t)dn) - 1075; // Exp
-
-		pack();
-	}
-	else exponent = 0;
-}
-
-inline double bigfloat::get_d() const {
-	if (mantissa.empty()) return 0.0;
-
-	// Reconstruct the mantissa starting from the first two limbs (if available) and normalize it to the 52-bit precision of a double
-	const uint32_t lz = mantissa.countLeadingZeroes() + 1; // +1 to account for the implicit leading 1 in normalized doubles
-	uint64_t m = mantissa[0] << lz;
-	if (mantissa.size() > 1) m |= (mantissa[1] >> (64 - lz));
-	m >>= 12; // Keep only the 52 most significant bits of the mantissa
-
-	const uint32_t nsb = mantissa.size() * 64 - lz; // Number of significant bits in mantissa (not counting the implcit leading 1)
-
-	// Reconstruct the exponent and handle special cases (underflow, overflow)
-	int32_t exp = exponent + 1023 + nsb; // Adjust the exponent to the double's bias and to account for unused mantissa bits
-	if (exp <= 0) return 0.0; // Underflow
-	else if (exp >= 2047) return sign < 0 ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity(); // Overflow
-	uint64_t ne = (uint64_t)exp;
-	ne <<= 52;
-	m |= ne;
-
-	// Set the sign bit if the number is negative
-	if (sign < 0) m |= 0x8000000000000000; // Set the sign bit if negative
-
-	// Convert to double and return
-	return *((double*)(&m));
-}
-
-inline bigfloat bigfloat::operator+(const bigfloat& b) const {
-	if (mantissa.empty()) return b;
-	if (b.mantissa.empty()) return *this;
-
-	if (exponent == b.exponent) {
-		bigfloat result;
-
-		if (sign == b.sign) {
-			result.mantissa.toSum(mantissa, b.mantissa);
-			result.sign = sign;
-		}
-		else if (b.mantissa >= mantissa) {
-			result.mantissa.toDiff(b.mantissa, mantissa);
-			result.sign = b.sign;
-		}
-		else {
-			result.mantissa.toDiff(mantissa, b.mantissa);
-			result.sign = sign;
-		}
-
-		result.exponent = exponent;
-		result.pack();
-		return result;
-	}
-	else if (exponent > b.exponent) {
-		bigfloat op(*this);
-		op.leftShift((uint32_t)(exponent - b.exponent));
-		return op + b;
-	}
-	else { // exponent < b.exponent
-		bigfloat op(b);
-		op.leftShift((uint32_t)(b.exponent - exponent));
-		return op + *this;
-	}
-}
-
-inline bigfloat bigfloat::operator-(const bigfloat& b) const {
-	if (mantissa.empty()) return b.inverse();
-	if (b.mantissa.empty()) return *this;
-
-	if (exponent == b.exponent) {
-		bigfloat result;
-
-		if (sign != b.sign) {
-			result.mantissa.toSum(mantissa, b.mantissa);
-			result.sign = sign;
-		}
-		else if (b.mantissa >= mantissa) {
-			result.mantissa.toDiff(b.mantissa, mantissa);
-			result.sign = -sign;
-		}
-		else {
-			result.mantissa.toDiff(mantissa, b.mantissa);
-			result.sign = sign;
-		}
-
-		result.exponent = exponent;
-		result.pack();
-		return result;
-	}
-	else if (exponent > b.exponent) {
-		bigfloat op(*this);
-		op.leftShift((uint32_t)(exponent - b.exponent));
-		return op - b;
-	}
-	else { // exponent < b.exponent
-		bigfloat op(b);
-		op.leftShift((uint32_t)(b.exponent - exponent));
-		return *this - op;
-	}
-}
-
-
-inline bigfloat bigfloat::operator*(const bigfloat& b) const {
-	if (mantissa.empty() || b.mantissa.empty()) return 0;
-
-	bigfloat result;
-	result.mantissa.toProd(mantissa, b.mantissa);
-	result.sign = sign * b.sign;
-	result.exponent = exponent + b.exponent;
-	result.pack();
-	return result;
-}
-
-inline std::string bigfloat::get_str() const {
-	std::string s;
-	if (sign == 0) s += "0";
-	if (sign < 0) s += "-";
-	s += mantissa.get_str();
-	s += " * 2^";
-	s += std::to_string(exponent);
-	return s;
-}
-
-inline void bigfloat::pack() {
-	if (mantissa.empty()) {
-		sign = exponent = 0;
-		return;
-	}
-
-	while (mantissa.back() == 0) {
-		mantissa.pop_back();
-		exponent += 64;
-	}
-
-	const uint32_t s = mantissa.countEndingZeroesLSL();
-	if (s) {
-		auto dp = mantissa.digits, de = mantissa.digits + mantissa.m_size - 1;
-		const uint32_t ts = 64 - s;
-		while (dp != de) {
-			*de >>= s;
-			*de |= ((*(de - 1)) << ts);
-			de--;
-		}
-		*de >>= s;
-		exponent += s;
-	}
-
-	mantissa.pack();
-}
-
-inline bigfloat bigfloat::sqrt(uint32_t prec_bits) const {
-	assert(sign >= 0);
-	bigfloat a = *this;
-
-	// Need twice precision here, because the sqrt will halve it
-	uint32_t shf = prec_bits * 2;
-
-	// Possibly shift the mantissa to get the precision required
-	uint32_t msb = a.mantissa.getNumSignificantBits();
-	if (shf > msb) a.leftShift(shf - msb);
-	else a.rightShift(msb - shf);
-
-	// If exponent is not divisible by 2, add 1 and shift
-	if (a.exponent & 1) a.leftShift(1);
-
-	// Now compute the sqrt
-	// exponent is halved and mantissa is sqrt'ed
-	a.exponent >>= 1;
-	a.mantissa = a.mantissa.sqrt();
-	a.pack();
-
-	return a;
-}
-
-inline bigfloat bigfloat::inverse() const {
-	bigfloat r = *this;
-	r.invert();
-	return r;
-}
-
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// FUNCTION IMPLEMENTATIONS - BIGRATIONAL
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-
-inline void bigrational::invert() {
-	assert(sign != 0);
-	std::swap(numerator, denominator);
-}
-
-inline bigrational bigrational::inverse() const { bigrational r = *this; r.invert(); return r; }
-
-inline void bigrational::negate() { sign = -sign; }
-
-inline bigrational bigrational::negation() const { bigrational r = *this; r.negate(); return r; }
-
-inline bigrational bigrational::operator-(const bigrational& r) const { return operator+(r.negation()); }
-
-inline bigrational bigrational::operator*(const bigrational& r) const {
-	if (sign == 0 || r.sign == 0) return bigrational();
-	else return bigrational(numerator * r.numerator, denominator * r.denominator, sign * r.sign);
-}
-
-inline bigrational bigrational::operator/(const bigrational& r) const {
-	assert(r.sign != 0);
-	return operator*(r.inverse());
-}
-
-inline bool bigrational::operator==(const bigrational& r) const {
-	return (sign == r.sign && hasEqualModule(r));
-}
-
-inline bool bigrational::operator!=(const bigrational& r) const {
-	return (sign != r.sign || !hasEqualModule(r));
-}
-
-inline bool bigrational::operator>(const bigrational& r) const {
-	return (sign > r.sign || (sign > 0 && r.sign > 0 && hasGreaterModule(r)) || (sign < 0 && r.sign < 0 && r.hasGreaterModule(*this)));
-}
-
-inline bool bigrational::operator>=(const bigrational& r) const {
-	return (sign > r.sign || (sign > 0 && r.sign > 0 && hasGrtrOrEqModule(r)) || (sign < 0 && r.sign < 0 && r.hasGrtrOrEqModule(*this)));
-}
-
-inline bool bigrational::operator<(const bigrational& r) const {
-	return (sign < r.sign || (sign < 0 && r.sign < 0 && hasGreaterModule(r)) || (sign > 0 && r.sign > 0 && r.hasGreaterModule(*this)));
-}
-
-inline bool bigrational::operator<=(const bigrational& r) const {
-	return (sign < r.sign || (sign < 0 && r.sign < 0 && hasGrtrOrEqModule(r)) || (sign > 0 && r.sign > 0 && r.hasGrtrOrEqModule(*this)));
-}
-
-inline bool bigrational::hasGreaterModule(const bigrational& r) const {
-	return numerator * r.denominator > r.numerator * denominator;
-}
-
-inline bool bigrational::hasEqualModule(const bigrational& r) const {
-	return numerator * r.denominator == r.numerator * denominator;
-}
-
-inline bool bigrational::hasGrtrOrEqModule(const bigrational& r) const {
-	return numerator * r.denominator >= r.numerator * denominator;
-}
-
-inline const bignatural& bigrational::get_num() const { return numerator; }
-inline const bignatural& bigrational::get_den() const { return denominator; }
-
-inline int32_t bigrational::sgn() const { return sign; }
-
-inline bigrational::bigrational(const bigfloat& f) {
-	if (f.sgn() == 0) sign = 0;
-	else {
-		sign = f.sgn();
-		numerator = f.getMantissa();
-		denominator = 1;
-		int32_t e = f.getExponent();
-		if (e >= 0) numerator.leftShift((uint32_t)e);
-		else denominator.leftShift((uint32_t)(-e));
-	}
-}
-
-inline void bigrational::init(FILE* fp) {
-	sign = 1;
-	int c;
-	while (isspace(c = fgetc(fp)));
-	if (c == '-') sign = -1;
-	else if (c != EOF) ungetc(c, fp);
-
-	numerator = bignatural(fp);
-
-	c = fgetc(fp);
-	if (c == '/') {
-		denominator = bignatural(fp);
-		if (numerator.empty()) {
-			sign = 0;
-			denominator = 0;
-		}
-	}
-	else if (c == '.') {
-		uint64_t num_digits = (uint64_t)ftell(fp);
-		bignatural decimal_part = bignatural(fp);
-		num_digits = ftell(fp) - num_digits; // Number of decimal digits read
-		denominator = 1U;
-		while (num_digits--) denominator *= 10U;
-		numerator *= denominator;
-		numerator += decimal_part;
-		canonicalize();
-	}
-	else {
 		if (c != EOF) ungetc(c, fp);
-		denominator = 1;
+		s[i] = 0;
+		init(s);
 	}
-}
 
-inline void bigrational::compress() {
-	const uint32_t nez = numerator.countEndingZeroes();
-	const uint32_t dez = denominator.countEndingZeroes();
-	const uint32_t s = std::min(nez, dez);
-	numerator >>= s;
-	denominator >>= s;
-}
+	inline size_t bignatural::scan_uint64_t(const char* s, uint64_t& t) {
+		const uint64_t limit_n = UINT64_MAX / 10 - 1;
+		uint64_t n = 0;
+		size_t i = 0;
 
-inline void bigrational::canonicalize() {
-	assert(denominator.size());
-	if (sign) {
-		if (numerator.empty()) {
-			numerator = denominator = 0;
-			sign = 0;
+		int c = s[i];
+		while (isdigit(c) && n <= limit_n) {
+			n *= 10;
+			n += (c - '0');
+			c = s[++i];
+		}
+
+		t = n;
+		return i;
+	}
+
+	inline void bignatural::init(const char* s) {
+		m_size = m_capacity = 0;
+		digits = NULL;
+
+		uint64_t n;
+		size_t r = 0;
+		while ((r = scan_uint64_t(s, n)) != 0) {
+			s += r;
+			while (r--) operator*=(10ULL);
+			operator+=(n);
+		}
+	}
+
+	inline void bignatural::init(const bignatural& m) {
+		m_size = m.m_size;
+		m_capacity = m.m_capacity;
+		if (m_capacity) {
+			digits = BN_ALLOC(sizeof(uint64_t) * m_capacity);
+			if (m_size) memcpy(digits, m.digits, sizeof(uint64_t) * m_size);
+		}
+		else digits = NULL;
+	}
+
+	inline void bignatural::init(const uint64_t m) {
+		if (m == 0) {
+			m_size = m_capacity = 0;
+			digits = NULL;
 		}
 		else {
-			compress();
-			const bignatural gcd = numerator.GCD(denominator);
-			if (!gcd.isOne()) {
-				numerator = numerator.divide_by_exact(gcd);
-				denominator = denominator.divide_by_exact(gcd);
+			m_size = m_capacity = 1;
+			digits = BN_ALLOC(sizeof(uint64_t));
+			digits[0] = m;
+		}
+	}
+
+	inline void bignatural::init(const uint32_t m) {
+		init((uint64_t)m);
+	}
+
+	inline bool bignatural::toUint64(uint64_t& n) const {
+		if (m_size == 0) n = 0;
+		else if (m_size == 1) n = digits[0];
+		else return false;
+
+		return true;
+	}
+
+	inline bignatural& bignatural::operator=(const bignatural& m) {
+		if (digits != m.digits) {
+			if (m_capacity >= m.m_size) {
+				m_size = m.m_size;
+				if (m_size) memcpy(digits, m.digits, sizeof(uint64_t) * m_size);
+			}
+			else {
+				BN_FREE(digits);
+				init(m);
+			}
+		}
+
+		return *this;
+	}
+
+	inline bignatural& bignatural::operator=(const uint64_t m) {
+		BN_FREE(digits);
+		init(m);
+		return *this;
+	}
+
+	inline void bignatural::operator<<=(uint32_t n) {
+		if (m_size == 0) return;
+		leftShift(n);
+	}
+
+	inline void bignatural::leftShift(uint32_t n) {
+		uint32_t s = n & 63U;
+		uint32_t lz = countLeadingZeroes();
+		uint32_t s2 = 64 - s;
+
+		if (lz < s) { // Need a further limb
+			push_back(0);
+			auto de = digits + m_size;
+			while (digits != --de) {
+				*de >>= s2;
+				*de |= ((*(de - 1)) << s);
+			}
+			*de >>= s2;
+		}
+		else if (s) { // Leading zeroes are enough
+			auto dp = digits, de = digits + m_size - 1;
+			while (dp != de) {
+				*dp <<= s;
+				*dp |= ((*(dp + 1)) >> s2);
+				dp++;
+			}
+			*dp <<= s;
+		}
+
+		while (n >= 64) {
+			push_back(0);
+			n -= 64;
+		}
+	}
+
+	inline void bignatural::operator>>=(uint32_t n) {
+		if ((n >> 6) >= m_size) {
+			m_size = 0;
+			return;
+		}
+
+		while (n >= 64) {
+			pop_back();
+			n -= 64;
+		}
+		if (!n) return;
+
+		auto dp = digits, de = digits + m_size;
+		while (dp != --de) {
+			*de >>= n;
+			*de |= ((*(de - 1)) << (64 - n));
+		}
+		if ((*de >>= n) == 0) pop_front();
+	}
+
+	inline bool bignatural::operator==(const bignatural& b) const {
+		if (size() != b.size()) return false;
+		auto dp = digits, de = digits + m_size, db = b.digits;
+		while (dp != de && *dp == *db) { dp++; db++; }
+		return (dp == de);
+	}
+
+	inline bool bignatural::operator!=(const bignatural& b) const {
+		if (size() != b.size()) return true;
+		auto dp = digits, de = digits + m_size, db = b.digits;
+		while (dp != de && *dp == *db) { dp++; db++; }
+		return (dp != de);
+	}
+
+	inline bool bignatural::operator>=(const bignatural& b) const {
+		const int s = (size() > b.size()) - (size() < b.size());
+		if (s) return (s > 0);
+
+		auto dp = digits, de = digits + m_size, db = b.digits;
+		while (dp != de && *dp == *db) { dp++; db++; }
+		return (dp == de || *dp > *db);
+	}
+
+	inline bool bignatural::operator>(const bignatural& b) const {
+		const int s = (size() > b.size()) - (size() < b.size());
+		if (s) return (s > 0);
+
+		auto dp = digits, de = digits + m_size, db = b.digits;
+		while (dp != de && *dp == *db) { dp++; db++; }
+		return (dp != de && *dp > *db);
+	}
+
+	inline bignatural bignatural::operator*(const bignatural& b) const {
+		bignatural result;
+		result.toProd(*this, b);
+		return result;
+	}
+
+	inline bignatural bignatural::operator|(const bignatural& b) const {
+		bignatural result;
+
+		if (m_size >= b.size()) {
+			result = *this;
+			uint64_t* rd = result.digits + m_size;
+			uint64_t* bd = b.digits + b.m_size;
+			do { *--rd |= *--bd; } while (bd != b.digits);
+		}
+		else {
+			result = b;
+			uint64_t* rd = result.digits + m_size;
+			uint64_t* bd = b.digits + b.m_size;
+			do { *--rd |= *--bd; } while (rd != result.digits);
+		}
+
+		return result;
+	}
+
+	inline bignatural bignatural::divide_by(const uint64_t D, uint64_t& remainder) const {
+		assert(D != 0);
+
+		// If possible, use hardware division
+		uint64_t n;
+		if (toUint64(n)) {
+			remainder = n % D;
+			return n / D;
+		}
+
+		bignatural Q;
+		Q.reserve(m_size);
+		uint64_t rem = 0;
+
+		for (size_t next_digit = 0; next_digit < m_size; next_digit++) {
+			uint64_t q_digit = _nfg_div_with_rem(rem, digits[next_digit], D);
+			if (!Q.empty() || q_digit) Q.push_back(q_digit);
+		}
+		remainder = rem;
+
+		return Q;
+	}
+
+	// Short division (assumes no remainder)
+	inline bignatural bignatural::divide_by_exact(const uint64_t D) const {
+		assert(D != 0);
+
+		// If possible, use hardware division
+		uint64_t n;
+		if (toUint64(n)) return n / D;
+
+		bignatural Q;
+		Q.reserve(m_size);
+		uint64_t rem = 0;
+
+		for (size_t next_digit = 0; next_digit < m_size; next_digit++) {
+			uint64_t q_digit = _nfg_div_with_rem(rem, digits[next_digit], D);
+			if (!Q.empty() || q_digit) Q.push_back(q_digit);
+		}
+		assert(rem == 0);
+
+		return Q;
+	}
+
+	inline uint32_t bignatural::getNumSignificantBits() const {
+		if (!m_size) return 0;
+		return (m_size * 64) - nfg_count_lz(digits[0]);
+	}
+
+	inline bool bignatural::getBit(uint32_t b) const {
+		const uint32_t dig = (m_size - (b >> 6)) - 1;
+		const uint32_t bit = b & 63;
+		return (digits[dig] & (UINT64_C(1) << bit));
+	}
+
+	// Long division
+	inline bignatural bignatural::divide_by(const bignatural& divisor, bignatural& remainder) const {
+		if (divisor.empty()) ip_error("Division by zero\n");
+		if (empty()) return (uint32_t)0;
+
+		// If both dividend and divisor fit into 64 bits, use hardware division
+		uint64_t n, d;
+		if (toUint64(n) && divisor.toUint64(d)) {
+			remainder = n % d;
+			return n / d;
+		}
+
+		// If divisor fits into 64 bits, revert to short division
+		uint64_t d64, rem;
+		if (divisor.toUint64(d64)) {
+			bignatural q = divide_by(d64, rem);
+			remainder = rem;
+			return q;
+		}
+
+		// If divisor is greater than dividend...
+		if (divisor > *this) {
+			remainder = *this;
+			return (uint32_t)0;
+		}
+
+		// Use binary (per-bit) long division
+		const bignatural& dividend = *this;
+
+		bignatural quotient, loc_dividend;
+		quotient.reserve(m_size);
+		loc_dividend.reserve(m_size);
+		uint32_t next_dividend_bit = dividend.getNumSignificantBits();
+
+		do {
+			loc_dividend.push_bit_back(dividend.getBit(--next_dividend_bit));
+			if (loc_dividend >= divisor) {
+				loc_dividend -= divisor;
+				quotient.push_bit_back(1);
+			}
+			else if (!quotient.empty()) quotient.push_bit_back(0);
+		} while (next_dividend_bit);
+
+		remainder = loc_dividend;
+
+		return quotient;
+	}
+
+	// Exact long division (Barrett-Jebelean) - Assume remainder is zero
+	inline bignatural bignatural::divide_by_exact(const bignatural& divisor) const {
+		if (empty()) return (uint64_t)0;
+
+		// If the divisor fits into 64 bits, use short division for 64-bit
+		uint64_t d64;
+		if (divisor.toUint64(d64)) return divide_by_exact(d64);
+
+		// If both dividend and divisor fit into 64 bits, use hardware division
+		uint64_t n64;
+		if (toUint64(n64)) return n64 / d64; // d64 has already been extracted above
+
+		bignatural A(*this), B(divisor);
+
+		// 1. Shift both A and B until B is odd
+		size_t az = A.countEndingZeroes();
+		size_t bz = B.countEndingZeroes();
+		size_t trailing_zeroes = std::min(az, bz);
+		A >>= (uint32_t)trailing_zeroes;
+		B >>= (uint32_t)trailing_zeroes;
+
+		// Number of limbs of B and A
+		size_t n = B.size();
+		size_t m = A.size();
+
+		if (m < n) return (uint64_t)0;
+
+		size_t q_size = m - n + 1;
+		bignatural Q;
+		Q.resize((uint32_t)q_size); // Direct initialization to zero
+		Q.fillWithZeroes();
+
+		// 2. Compute the modular inverse of the least significant limb of B modulo 2^64
+		// In Big Endian the least significant limb is the limb at the back
+		uint64_t b = B.back();
+		uint64_t v = (3 * b) ^ 2; // Initial approximation to 4 bits
+		v *= (2 - b * v); // 8 bits
+		v *= (2 - b * v); // 16 bits
+		v *= (2 - b * v); // 32 bits
+		v *= (2 - b * v); // 64 bits of precision for 64-bit limb
+		// 3. Jebelean's main loop (Right-to-Left)
+		for (size_t i = 0; i < q_size; ++i) {
+			// Index of the current limb of A starting from the right (Big Endian)
+			size_t a_idx = m - 1 - i;
+
+			if (A[(int)a_idx] == 0) {
+				Q[(int)(q_size - 1 - i)] = 0;
+			}
+			else {
+				// Compute the i-th limb of the quotient
+				uint64_t q_i = A[(int)a_idx] * v;
+				Q[(int)(q_size - 1 - i)] = q_i;
+
+				uint64_t carry = 0;
+				uint64_t borrow = 0;
+
+				for (size_t j = 0; j < n; ++j) {
+					size_t b_idx = n - 1 - j;
+					size_t target_idx = m - 1 - i - j;
+
+					// 128-bit multiplication: prod_hi:prod_lo = q_i * B[b_idx] + carry
+					uint64_t prod_lo = _nfg_mul_with_carry(q_i, B[(int)b_idx], carry);
+
+					// Subtraction with borrow: A[target_idx] - prod_lo - borrow
+					uint64_t cur_a = A[(int)target_idx];
+					uint64_t sub = prod_lo + borrow;
+					uint64_t new_borrow = (sub < prod_lo) || (cur_a < sub) ? 1 : 0;
+
+					A[(int)target_idx] = cur_a - sub;
+					borrow = new_borrow;
+				}
+
+				// Propagation of remaining carry and borrow to the left
+				size_t k = i + n;
+				while ((carry > 0 || borrow > 0) && k < m) {
+					size_t k_idx = m - 1 - k;
+					uint64_t cur_a = A[(int)k_idx];
+					uint64_t sub = carry + borrow;
+
+					borrow = (cur_a < sub) ? 1 : 0;
+					A[(int)k_idx] = cur_a - sub;
+					carry = 0;
+					k++;
+				}
+			}
+		}
+
+		Q.pack();
+
+		return Q;
+	}
+
+	inline bignatural bignatural::sqrt() const
+	{
+		bignatural low, tmp, high = *this, mid = *this;
+
+		mid >>= 1U;
+		mid += 1U;
+
+		while (high > low)
+		{
+			if (mid * mid > *this) {
+				high = mid - 1U;
+				tmp = low + 1U;
+				mid -= tmp;
+				mid >>= 1;
+				mid += tmp;
+			}
+			else {
+				low = mid;
+				mid = high - low;
+				mid >>= 1;
+				mid += (low + 1U);
+			}
+		}
+
+		return low;
+	}
+
+	inline void bignatural::increaseCapacity(uint32_t new_capacity) {
+		m_capacity = new_capacity;
+		uint64_t* tmp_d = (uint64_t*)BN_ALLOC(sizeof(uint64_t) * m_capacity);
+		if (m_size) memcpy(tmp_d, digits, sizeof(uint64_t) * m_size);
+		BN_FREE(digits);
+		digits = tmp_d;
+	}
+
+	// Add one most significant digit to this number and make room for it if necessary
+	inline void bignatural::addOneMostSignificantDigit(uint64_t d) {
+		if (m_capacity == m_size) {
+			m_capacity++;
+			uint64_t* tmp_d = (uint64_t*)BN_ALLOC(sizeof(uint64_t) * m_capacity);
+			if (m_size) memcpy(tmp_d + 1, digits, sizeof(uint64_t) * m_size);
+			BN_FREE(digits);
+			digits = tmp_d;
+			digits[0] = d;
+		}
+		else { // m_capacity > m_size
+			uint64_t* td = digits + m_size;
+			while (--td != digits) *(td + 1) = *td;
+			*(td + 1) = *td;
+			*td = d;
+		}
+		m_size++;
+	}
+
+	// Binary GCD (Stein's Algorithm)
+	inline bignatural bignatural::GCD(const bignatural& B) const {
+		if (empty()) return B;
+		if (B.empty()) return *this;
+		return GCD_non_zero(B);
+	}
+
+	// Co-primality check
+	inline bool bignatural::coprime(const bignatural& B) const {
+		if (empty() || B.empty()) return true;
+		if (!(back() & (1UL)) && !(B.back() & (1UL))) return false; // Both numbers are even
+		return GCD_non_zero(B).isOne();
+	}
+
+	inline bignatural bignatural::GCD_non_zero(const bignatural& B) const {
+		bignatural a = (*this), b = B;
+
+		uint32_t az = a.countEndingZeroes();
+		uint32_t bz = b.countEndingZeroes();
+		uint32_t k = std::min(az, bz);
+
+		a >>= (az > bz) ? (az) : (k);
+		b >>= k;
+
+		bignatural* ap = &a;
+		bignatural* bp = &b;
+		do {
+			(*bp) >>= bp->countEndingZeroes();
+			if ((*ap) > (*bp)) std::swap(ap, bp);
+			(*bp) -= (*ap);
+		} while (!bp->empty());
+
+		(*ap) <<= k;
+		return (*ap);
+	}
+
+	// String representation in decimal form
+	inline std::string bignatural::get_dec_str() const {
+		std::string st;
+		bignatural N = *this;
+		uint64_t R;
+		if (N.empty()) return "0";
+		while (!N.empty()) {
+			N = N.divide_by(10, R);
+			st += ('0' + (char)R);
+		}
+		std::reverse(st.begin(), st.end());
+
+		return st;
+	}
+
+	// String representation in binary form
+	inline std::string bignatural::get_str() const {
+		std::string st;
+		char s[65];
+		s[64] = 0;
+		for (uint32_t j = 0; j < m_size; j++) {
+			for (int i = 0; i < 64; i++)
+				s[i] = (digits[j] & (UINT64_C(1) << (63 - i))) ? '1' : '0';
+			st += s;
+		}
+		return st;
+	}
+
+	// Count number of zeroes on the right (least significant binary digits)
+	inline uint32_t bignatural::countEndingZeroes() const {
+		if (m_size == 0) return 0;
+		uint32_t i = m_size;
+		uint32_t shft = 0;
+		while (!digits[--i])  shft += 64;
+
+		return shft + nfg_count_rz(digits[i]);
+	}
+
+	inline uint32_t bignatural::countLeadingZeroes() const {
+		return (uint32_t)nfg_count_lz(digits[0]);
+	}
+
+	inline void bignatural::toSum(const bignatural& a, const bignatural& b) {
+		operator=(a);
+		operator+=(b);
+	}
+
+	inline bignatural& bignatural::operator+=(const bignatural& b) {
+		if (m_size == 0) return operator=(b);
+		else if (&b == this) { // If b is this same number just multiply by two
+			operator<<=(1U);
+		}
+		else if (b.m_size != 0) {
+			const uint32_t a_s = m_size;
+			const uint32_t b_s = b.m_size;
+			unsigned char carry = 0;
+			uint64_t* __restrict dig_b = b.digits + b_s;
+
+			if (a_s > b_s) {
+				uint64_t* __restrict dig_a = digits + a_s;
+				do {
+					dig_a--; dig_b--;
+					carry = _nfg_add_with_carry(carry, *dig_a, *dig_b, dig_a);
+				} while (dig_b != b.digits);
+				do {
+					dig_a--;
+					carry = _nfg_add_with_carry(carry, *dig_a, 0, dig_a);
+				} while (dig_a != digits);
+			}
+			else if (a_s == b_s) {
+				uint64_t* __restrict dig_a = digits + a_s;
+				do {
+					dig_a--; dig_b--;
+					carry = _nfg_add_with_carry(carry, *dig_a, *dig_b, dig_a);
+				} while (dig_b != b.digits);
+			}
+			else { // if (a_s < b_s)
+				reserve(b_s + 1); // This might be a bit wasteful, but avoids a second allocation in case of carry
+				m_size = b_s;
+				uint64_t* __restrict dig_a = digits + a_s;
+				uint64_t* __restrict dig_r = digits + b_s;
+				do {
+					dig_a--; dig_b--; dig_r--;
+					carry = _nfg_add_with_carry(carry, *dig_a, *dig_b, dig_r);
+				} while (dig_a != digits);
+				do {
+					dig_b--; dig_r--;
+					carry = _nfg_add_with_carry(carry, 0, *dig_b, dig_r);
+				} while (dig_b != b.digits);
+			}
+
+			if (carry) addOneMostSignificantDigit((uint64_t)carry);
+		}
+
+		return *this;
+	}
+
+	inline void bignatural::toDiff(const bignatural& a, const bignatural& b) {
+		operator=(a);
+		operator-=(b);
+	}
+
+	inline bignatural& bignatural::operator-=(const bignatural& b) {
+		assert(operator>=(b));
+
+		if (b.m_size) {
+			uint64_t da, db, borrow = 0;
+			uint64_t* dig_a = digits + m_size;
+			const uint64_t* dig_b = b.digits + b.m_size;
+
+			do {
+				da = *(--dig_a);
+				uint64_t digit_b = *(--dig_b);
+				db = digit_b + borrow;
+				borrow = (db < digit_b) || (da < db);
+				*(dig_a) = da - db;
+			} while (dig_b != b.digits);
+
+			while (dig_a != digits) {
+				da = *(--dig_a);
+				db = borrow;
+				borrow = (da < db);
+				*(dig_a) = da - db;
+			}
+
+			pack();
+		}
+
+		return *this;
+	}
+
+	inline void bignatural::toProd(const bignatural& a, const bignatural& b) {
+		assert(m_size == 0 && m_capacity == 0); // This assumes that the number is zero!
+		const uint32_t N = a.size(), M = b.size();
+		if (N && M) {
+			m_size = m_capacity = (N + M);
+			digits = (uint64_t*)BN_ALLOC(sizeof(uint64_t) * m_capacity);
+
+			// Uses O(N*M) multiplication. This is the best choice for not-too-large factors
+			// Consider implementing Karatsuba's algorithm for larger numbers
+#if defined(_MSC_VER) && defined(USE_AVX2_INSTRUCTIONS)
+		// Urdhva Tiryagbhyam multiplication algorithm (vertical and crosswise)
+			uint64_t acc_lo = 0, acc_hi = 0, acc_extra = 0;
+
+			uint32_t kM = N - 1;
+			for (uint32_t k = kM + M; k >= 1; --k, --kM) {
+				uint32_t start_i = (k > M) ? (kM) : 0;
+				uint32_t end_i = (k < N) ? (k) : (N);
+				uint32_t j = k - start_i - 1;
+				for (uint32_t i = start_i; i < end_i; ++i, j--) {
+					uint64_t p_hi;
+					uint64_t p_lo = _umul128(a[i], b[j], &p_hi);
+					uint8_t carry = _nfg_add_with_carry(0, acc_lo, p_lo, &acc_lo);
+					acc_extra += _nfg_add_with_carry(carry, acc_hi, p_hi, &acc_hi);
+				}
+				digits[k] = acc_lo;
+
+				acc_lo = acc_hi;
+				acc_hi = acc_extra;
+				acc_extra = 0;
+			}
+			if (acc_lo)  digits[0] = acc_lo;
+			else memmove(digits, digits + 1, sizeof(uint64_t) * (--m_size));
+#elif defined(__SIZEOF_INT128__)
+		// Urdhva Tiryagbhyam multiplication algorithm (vertical and crosswise)
+			__uint128_t acc = 0;
+			uint64_t acc_extra = 0;
+
+			uint32_t kM = N - 1;
+			for (uint32_t k = kM + M; k >= 1; --k, --kM) {
+				uint32_t start_i = (k > M) ? (kM) : 0;
+				uint32_t end_i = (k < N) ? (k) : (N);
+				uint32_t j = k - start_i - 1;
+
+				for (uint32_t i = start_i; i < end_i; ++i, j--) {
+					__uint128_t prod = (__uint128_t)a[i] * b[j];
+					acc += prod;
+					if (acc < prod) acc_extra++;
+				}
+				digits[k] = (uint64_t)acc;
+
+				acc = (acc >> 64) | ((__uint128_t)acc_extra << 64);
+				acc_extra = 0;
+			}
+			if (acc != 0)  digits[0] = (uint64_t)acc;
+			else memmove(digits, digits + 1, sizeof(uint64_t) * (--m_size));
+#else
+		// Naive schoolbook multiplication
+			memset(digits, 0, m_size * sizeof(uint64_t));
+			uint32_t ls = 0;
+			for (uint64_t* d = b.digits + b.m_size; d != b.digits;) a.addmul(*(--d), ls++, *this);
+
+			if (digits[0] == 0) memmove(digits, digits + 1, sizeof(uint64_t) * (--m_size));
+#endif
+		}
+	}
+
+	inline void bignatural::addmul(uint64_t b, uint32_t left_shifts, bignatural& result) const {
+		const uint64_t* __restrict dp = digits + m_size;
+		uint64_t* __restrict rp = result.digits + result.m_size - left_shifts;
+
+		uint64_t hi, lo, pm = 0;
+		while (dp != digits) {
+			dp--; rp--;
+			hi = 0;
+			lo = _nfg_mul_with_carry(*dp, b, hi);
+			hi += _nfg_add_with_carry(0, *rp, lo, rp);
+			hi += _nfg_add_with_carry(0, *rp, pm, rp);
+			pm = hi;
+		}
+
+		*(--rp) = pm;
+	}
+
+	inline void bignatural::push_back(uint64_t b) {
+		if (m_size == m_capacity) increaseCapacity((m_capacity | 1) << 2);
+		digits[m_size++] = b;
+	}
+
+	inline void bignatural::push_bit_back(uint32_t b) {
+		if (m_size) {
+			leftShift(1);
+			back() |= b;
+		}
+		else if (b) push_back(1);
+	}
+
+	inline void bignatural::pop_front() {
+		uint64_t* d = digits, * de = digits + m_size;
+		while (++d != de) *(d - 1) = *d;
+		pop_back();
+	}
+
+	inline void bignatural::pack() {
+		uint32_t i = 0;
+		while (i < m_size && digits[i] == 0) i++;
+
+		if (i) {
+			uint64_t* dold = digits + i;
+			uint64_t* dnew = digits;
+			uint64_t* dend = digits + m_size;
+			while (dold < dend) *dnew++ = *dold++;
+			m_size -= i;
+		}
+	}
+
+
+	inline bignatural& bignatural::operator+=(const uint32_t b) {
+		if (b != 0) {
+			if (m_size) {
+				uint64_t pm = digits[(int)(m_size - 1)] + b;
+				digits[(int)m_size - 1] = pm;
+				uint64_t carry = pm < b;
+				for (uint32_t i = m_size - 1; carry && i > 0; i--) {
+					pm = digits[(int)(i - 1)] + carry;
+					digits[(int)i - 1] = pm;
+					carry = (pm == 0);
+				}
+				if (carry) addOneMostSignificantDigit((uint32_t)carry);
+			}
+			else init(b);
+		}
+
+		return *this;
+	}
+
+	inline bignatural& bignatural::operator+=(const uint64_t b) {
+		if (b <= UINT32_MAX) return operator+=((uint32_t)b);
+		else return operator+=(bignatural(b));
+	}
+
+	inline bignatural& bignatural::operator*=(const uint64_t b) {
+		if (m_size) {
+			if (b == 0) return operator=(0U);
+			uint64_t* da = digits + m_size;
+			uint64_t carry = 0;
+			while (da != digits) {
+				--da;
+				uint64_t lo, hi = 0;
+				lo = _nfg_mul_with_carry(*da, b, hi);
+				carry = hi + _nfg_add_with_carry(0, lo, carry, da);
+			}
+
+			if (carry) addOneMostSignificantDigit(carry);
+		}
+
+		return *this;
+	}
+
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
+	//
+	// FUNCTION IMPLEMENTATIONS - BIGFLOAT
+	//
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	inline bigfloat::bigfloat() : exponent(0), sign(0) {}
+
+	inline bigfloat::bigfloat(const bignatural& m, int32_t e, int32_t s) : mantissa(m), exponent(e), sign(s) {}
+
+	inline int32_t bigfloat::log2() const { return exponent + ((int32_t)mantissa.getNumSignificantBits()) - 1; }
+
+	inline void bigfloat::increaseMantissa() { mantissa += 1U; pack(); }
+
+	inline bool bigfloat::operator==(const bigfloat& b) const { return (operator-(b).sign == 0); }
+
+	inline bool bigfloat::operator!=(const bigfloat& b) const { return (operator-(b).sign != 0); }
+
+	inline bool bigfloat::operator<(const bigfloat& b) const {
+		assert(0 && "This function must be tested!");
+
+		if (sign < b.sign) return true;
+		if (sign > b.sign) return false;
+		const int32_t na = exponent + mantissa.getNumSignificantBits();
+		const int32_t nb = b.exponent + b.mantissa.getNumSignificantBits();
+		if (sign >= 0) {
+			if (na < nb) return true;
+			else if (na > nb) return false;
+			else if (exponent < b.exponent) return mantissa < (b.mantissa << (b.exponent - exponent));
+			else if (exponent > b.exponent) return (mantissa << (exponent - b.exponent)) < b.mantissa;
+			else return mantissa < b.mantissa;
+		}
+		else {
+			if (na < nb) return false;
+			else if (na > nb) return true;
+			else if (exponent < b.exponent) return mantissa > (b.mantissa << (b.exponent - exponent));
+			else if (exponent > b.exponent) return (mantissa << (exponent - b.exponent)) > b.mantissa;
+			else return mantissa > b.mantissa;
+		}
+	}
+
+	inline bool bigfloat::operator>(const bigfloat& b) const {
+		return b.operator<(*this);
+	}
+
+	inline void bigfloat::invert() { sign = -sign; }
+
+	inline int bigfloat::sgn() const { return sign; }
+
+	inline const bignatural& bigfloat::getMantissa() const { return mantissa; }
+
+	inline int32_t bigfloat::getExponent() const { return exponent; }
+
+	inline void bigfloat::leftShift(uint32_t n) {
+		mantissa <<= n;
+		exponent -= n;
+	}
+
+	inline void bigfloat::rightShift(uint32_t n) {
+		mantissa >>= n;
+		exponent += n;
+	}
+
+	inline bigfloat::bigfloat(const double d) {
+		sign = (d > 0) - (d < 0);
+
+		if (sign) {
+			uint64_t dn = *((uint64_t*)(&d));
+			const uint64_t m = (dn & 0x000fffffffffffff) + 0x0010000000000000;
+			mantissa.push_back(m);
+			dn <<= 1;
+			dn >>= 53;
+			exponent = ((int32_t)dn) - 1075; // Exp
+
+			pack();
+		}
+		else exponent = 0;
+	}
+
+	inline double bigfloat::get_d() const {
+		if (mantissa.empty()) return 0.0;
+
+		// Reconstruct the mantissa starting from the first two limbs (if available) and normalize it to the 52-bit precision of a double
+		const uint32_t lz = mantissa.countLeadingZeroes() + 1; // +1 to account for the implicit leading 1 in normalized doubles
+		uint64_t m = mantissa[0] << lz;
+		if (mantissa.size() > 1) m |= (mantissa[1] >> (64 - lz));
+		m >>= 12; // Keep only the 52 most significant bits of the mantissa
+
+		const uint32_t nsb = mantissa.size() * 64 - lz; // Number of significant bits in mantissa (not counting the implcit leading 1)
+
+		// Reconstruct the exponent and handle special cases (underflow, overflow)
+		int32_t exp = exponent + 1023 + nsb; // Adjust the exponent to the double's bias and to account for unused mantissa bits
+		if (exp <= 0) return 0.0; // Underflow
+		else if (exp >= 2047) return sign < 0 ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity(); // Overflow
+		uint64_t ne = (uint64_t)exp;
+		ne <<= 52;
+		m |= ne;
+
+		// Set the sign bit if the number is negative
+		if (sign < 0) m |= 0x8000000000000000; // Set the sign bit if negative
+
+		// Convert to double and return
+		return *((double*)(&m));
+	}
+
+	inline bigfloat bigfloat::operator+(const bigfloat& b) const {
+		if (mantissa.empty()) return b;
+		if (b.mantissa.empty()) return *this;
+
+		if (exponent == b.exponent) {
+			bigfloat result;
+
+			if (sign == b.sign) {
+				result.mantissa.toSum(mantissa, b.mantissa);
+				result.sign = sign;
+			}
+			else if (b.mantissa >= mantissa) {
+				result.mantissa.toDiff(b.mantissa, mantissa);
+				result.sign = b.sign;
+			}
+			else {
+				result.mantissa.toDiff(mantissa, b.mantissa);
+				result.sign = sign;
+			}
+
+			result.exponent = exponent;
+			result.pack();
+			return result;
+		}
+		else if (exponent > b.exponent) {
+			bigfloat op(*this);
+			op.leftShift((uint32_t)(exponent - b.exponent));
+			return op + b;
+		}
+		else { // exponent < b.exponent
+			bigfloat op(b);
+			op.leftShift((uint32_t)(b.exponent - exponent));
+			return op + *this;
+		}
+	}
+
+	inline bigfloat bigfloat::operator-(const bigfloat& b) const {
+		if (mantissa.empty()) return b.inverse();
+		if (b.mantissa.empty()) return *this;
+
+		if (exponent == b.exponent) {
+			bigfloat result;
+
+			if (sign != b.sign) {
+				result.mantissa.toSum(mantissa, b.mantissa);
+				result.sign = sign;
+			}
+			else if (b.mantissa >= mantissa) {
+				result.mantissa.toDiff(b.mantissa, mantissa);
+				result.sign = -sign;
+			}
+			else {
+				result.mantissa.toDiff(mantissa, b.mantissa);
+				result.sign = sign;
+			}
+
+			result.exponent = exponent;
+			result.pack();
+			return result;
+		}
+		else if (exponent > b.exponent) {
+			bigfloat op(*this);
+			op.leftShift((uint32_t)(exponent - b.exponent));
+			return op - b;
+		}
+		else { // exponent < b.exponent
+			bigfloat op(b);
+			op.leftShift((uint32_t)(b.exponent - exponent));
+			return *this - op;
+		}
+	}
+
+
+	inline bigfloat bigfloat::operator*(const bigfloat& b) const {
+		if (mantissa.empty() || b.mantissa.empty()) return 0;
+
+		bigfloat result;
+		result.mantissa.toProd(mantissa, b.mantissa);
+		result.sign = sign * b.sign;
+		result.exponent = exponent + b.exponent;
+		result.pack();
+		return result;
+	}
+
+	inline std::string bigfloat::get_str() const {
+		std::string s;
+		if (sign == 0) s += "0";
+		if (sign < 0) s += "-";
+		s += mantissa.get_str();
+		s += " * 2^";
+		s += std::to_string(exponent);
+		return s;
+	}
+
+	inline void bigfloat::pack() {
+		if (mantissa.empty()) {
+			sign = exponent = 0;
+			return;
+		}
+
+		while (mantissa.back() == 0) {
+			mantissa.pop_back();
+			exponent += 64;
+		}
+
+		const uint32_t s = mantissa.countEndingZeroesLSL();
+		if (s) {
+			auto dp = mantissa.digits, de = mantissa.digits + mantissa.m_size - 1;
+			const uint32_t ts = 64 - s;
+			while (dp != de) {
+				*de >>= s;
+				*de |= ((*(de - 1)) << ts);
+				de--;
+			}
+			*de >>= s;
+			exponent += s;
+		}
+
+		mantissa.pack();
+	}
+
+	inline bigfloat bigfloat::sqrt(uint32_t prec_bits) const {
+		assert(sign >= 0);
+		bigfloat a = *this;
+
+		// Need twice precision here, because the sqrt will halve it
+		uint32_t shf = prec_bits * 2;
+
+		// Possibly shift the mantissa to get the precision required
+		uint32_t msb = a.mantissa.getNumSignificantBits();
+		if (shf > msb) a.leftShift(shf - msb);
+		else a.rightShift(msb - shf);
+
+		// If exponent is not divisible by 2, add 1 and shift
+		if (a.exponent & 1) a.leftShift(1);
+
+		// Now compute the sqrt
+		// exponent is halved and mantissa is sqrt'ed
+		a.exponent >>= 1;
+		a.mantissa = a.mantissa.sqrt();
+		a.pack();
+
+		return a;
+	}
+
+	inline bigfloat bigfloat::inverse() const {
+		bigfloat r = *this;
+		r.invert();
+		return r;
+	}
+
+
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
+	//
+	// FUNCTION IMPLEMENTATIONS - BIGRATIONAL
+	//
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	inline void bigrational::invert() {
+		assert(sign != 0);
+		std::swap(numerator, denominator);
+	}
+
+	inline bigrational bigrational::inverse() const { bigrational r = *this; r.invert(); return r; }
+
+	inline void bigrational::negate() { sign = -sign; }
+
+	inline bigrational bigrational::negation() const { bigrational r = *this; r.negate(); return r; }
+
+	inline bigrational bigrational::operator-(const bigrational& r) const { return operator+(r.negation()); }
+
+	inline bigrational bigrational::operator*(const bigrational& r) const {
+		if (sign == 0 || r.sign == 0) return bigrational();
+		else return bigrational(numerator * r.numerator, denominator * r.denominator, sign * r.sign);
+	}
+
+	inline bigrational bigrational::operator/(const bigrational& r) const {
+		assert(r.sign != 0);
+		return operator*(r.inverse());
+	}
+
+	inline bool bigrational::operator==(const bigrational& r) const {
+		return (sign == r.sign && hasEqualModule(r));
+	}
+
+	inline bool bigrational::operator!=(const bigrational& r) const {
+		return (sign != r.sign || !hasEqualModule(r));
+	}
+
+	inline bool bigrational::operator>(const bigrational& r) const {
+		return (sign > r.sign || (sign > 0 && r.sign > 0 && hasGreaterModule(r)) || (sign < 0 && r.sign < 0 && r.hasGreaterModule(*this)));
+	}
+
+	inline bool bigrational::operator>=(const bigrational& r) const {
+		return (sign > r.sign || (sign > 0 && r.sign > 0 && hasGrtrOrEqModule(r)) || (sign < 0 && r.sign < 0 && r.hasGrtrOrEqModule(*this)));
+	}
+
+	inline bool bigrational::operator<(const bigrational& r) const {
+		return (sign < r.sign || (sign < 0 && r.sign < 0 && hasGreaterModule(r)) || (sign > 0 && r.sign > 0 && r.hasGreaterModule(*this)));
+	}
+
+	inline bool bigrational::operator<=(const bigrational& r) const {
+		return (sign < r.sign || (sign < 0 && r.sign < 0 && hasGrtrOrEqModule(r)) || (sign > 0 && r.sign > 0 && r.hasGrtrOrEqModule(*this)));
+	}
+
+	inline bool bigrational::hasGreaterModule(const bigrational& r) const {
+		return numerator * r.denominator > r.numerator * denominator;
+	}
+
+	inline bool bigrational::hasEqualModule(const bigrational& r) const {
+		return numerator * r.denominator == r.numerator * denominator;
+	}
+
+	inline bool bigrational::hasGrtrOrEqModule(const bigrational& r) const {
+		return numerator * r.denominator >= r.numerator * denominator;
+	}
+
+	inline const bignatural& bigrational::get_num() const { return numerator; }
+	inline const bignatural& bigrational::get_den() const { return denominator; }
+
+	inline int32_t bigrational::sgn() const { return sign; }
+
+	inline bigrational::bigrational(const bigfloat& f) {
+		if (f.sgn() == 0) sign = 0;
+		else {
+			sign = f.sgn();
+			numerator = f.getMantissa();
+			denominator = 1;
+			int32_t e = f.getExponent();
+			if (e >= 0) numerator.leftShift((uint32_t)e);
+			else denominator.leftShift((uint32_t)(-e));
+		}
+	}
+
+	inline void bigrational::init(FILE* fp) {
+		sign = 1;
+		int c;
+		while (isspace(c = fgetc(fp)));
+		if (c == '-') sign = -1;
+		else if (c != EOF) ungetc(c, fp);
+
+		numerator = bignatural(fp);
+
+		c = fgetc(fp);
+		if (c == '/') {
+			denominator = bignatural(fp);
+			if (numerator.empty()) {
+				sign = 0;
+				denominator = 0;
+			}
+		}
+		else if (c == '.') {
+			uint64_t num_digits = (uint64_t)ftell(fp);
+			bignatural decimal_part = bignatural(fp);
+			num_digits = ftell(fp) - num_digits; // Number of decimal digits read
+			denominator = 1U;
+			while (num_digits--) denominator *= 10U;
+			numerator *= denominator;
+			numerator += decimal_part;
+			canonicalize();
+		}
+		else {
+			if (c != EOF) ungetc(c, fp);
+			denominator = 1;
+		}
+	}
+
+	inline void bigrational::compress() {
+		const uint32_t nez = numerator.countEndingZeroes();
+		const uint32_t dez = denominator.countEndingZeroes();
+		const uint32_t s = std::min(nez, dez);
+		numerator >>= s;
+		denominator >>= s;
+	}
+
+	inline void bigrational::canonicalize() {
+		assert(denominator.size());
+		if (sign) {
+			if (numerator.empty()) {
+				numerator = denominator = 0;
+				sign = 0;
+			}
+			else {
+				compress();
+				const bignatural gcd = numerator.GCD(denominator);
+				if (!gcd.isOne()) {
+					numerator = numerator.divide_by_exact(gcd);
+					denominator = denominator.divide_by_exact(gcd);
+				}
 			}
 		}
 	}
-}
 
-inline bigrational bigrational::operator+(const bigrational& r) const {
-	if (sign == 0) return r;
-	else if (r.sign == 0) return *this;
-	else {
-		const bignatural left_num = numerator * r.denominator;
-		const bignatural right_num = r.numerator * denominator;
-		bigrational sum;
-		if (sign == r.sign)	sum = bigrational(left_num + right_num, denominator * r.denominator, sign);
-		else if (sign > 0) {
-			if (left_num >= right_num) sum = bigrational(left_num - right_num, denominator * r.denominator, 1);
-			else sum = bigrational(right_num - left_num, denominator * r.denominator, -1);
+	inline bigrational bigrational::operator+(const bigrational& r) const {
+		if (sign == 0) return r;
+		else if (r.sign == 0) return *this;
+		else {
+			const bignatural left_num = numerator * r.denominator;
+			const bignatural right_num = r.numerator * denominator;
+			bigrational sum;
+			if (sign == r.sign)	sum = bigrational(left_num + right_num, denominator * r.denominator, sign);
+			else if (sign > 0) {
+				if (left_num >= right_num) sum = bigrational(left_num - right_num, denominator * r.denominator, 1);
+				else sum = bigrational(right_num - left_num, denominator * r.denominator, -1);
+			}
+			else { // if (sign < 0 && r.sign > 0)
+				if (left_num >= right_num) sum = bigrational(left_num - right_num, denominator * r.denominator, -1);
+				else sum = bigrational(right_num - left_num, denominator * r.denominator, 1);
+			}
+
+			if (!denominator.coprime(r.denominator)) sum.canonicalize();
+
+			return sum;
 		}
-		else { // if (sign < 0 && r.sign > 0)
-			if (left_num >= right_num) sum = bigrational(left_num - right_num, denominator * r.denominator, -1);
-			else sum = bigrational(right_num - left_num, denominator * r.denominator, 1);
-		}
-
-		if (!denominator.coprime(r.denominator)) sum.canonicalize();
-
-		return sum;
-	}
-}
-
-inline double bigrational::get_d() const {
-	if (sign == 0) return 0.0;
-
-	bignatural num = numerator;
-	bignatural den = denominator;
-	int32_t E = (int32_t)num.getNumSignificantBits() - (int32_t)den.getNumSignificantBits();
-	if (E > 0) { den.leftShift((uint32_t)E); if (den > num) { E--; den >>= 1; } }
-	else if (E <= 0) { num.leftShift((uint32_t)(-E)); if (den > num) { E--; num.leftShift(1); } }
-
-	if (E > 1023) return INFINITY;
-	else if (E < -1022) return -INFINITY;
-
-	uint64_t signbit = sign < 0 ? ((uint64_t)1) << 63 : 0;
-	uint64_t exponent = ((uint64_t)(1023 + E)) << 52;
-	uint64_t mantissa = 0;
-
-	for (int i = 0; i < 53; i++) {
-		mantissa <<= 1;
-		if (num >= den) {
-			mantissa |= 1;
-			num = num - den;
-		}
-		num <<= 1;
-	}
-	mantissa &= (~(((uint64_t)1) << 52));
-	mantissa |= exponent;
-	mantissa |= signbit;
-
-	void* ptr = &mantissa;
-
-	return *((double*)ptr);
-}
-
-inline bigfloat bigrational::get_bigfloat(uint32_t num_significant_bits) const {
-	if (sign == 0) return 0.0;
-
-	bignatural num = numerator;
-	bignatural den = denominator;
-	int32_t E = (int32_t)num.getNumSignificantBits() - (int32_t)den.getNumSignificantBits();
-	if (E > 0) { den.leftShift((uint32_t)E); if (den > num) { E--; den >>= 1; } }
-	else if (E <= 0) { num.leftShift((uint32_t)(-E)); if (den > num) { E--; num.leftShift(1); } }
-
-	bignatural mantissa;
-
-	for (uint32_t i = 0; i <= num_significant_bits; i++) {
-		mantissa <<= 1;
-		if (num >= den) {
-			mantissa |= 1ULL;
-			num = num - den;
-		}
-		num <<= 1;
 	}
 
-	return bigfloat(mantissa, E - (int32_t)num_significant_bits, sign);
-}
+	inline double bigrational::get_d() const {
+		if (sign == 0) return 0.0;
 
-inline std::string bigrational::get_dec_str() const {
-	std::string st;
-	if (sign < 0) st = "-";
-	else if (sign == 0) return "0";
-	st += numerator.get_dec_str();
-	const std::string dens = denominator.get_dec_str();
-	if (dens != "1") {
+		bignatural num = numerator;
+		bignatural den = denominator;
+		int32_t E = (int32_t)num.getNumSignificantBits() - (int32_t)den.getNumSignificantBits();
+		if (E > 0) { den.leftShift((uint32_t)E); if (den > num) { E--; den >>= 1; } }
+		else if (E <= 0) { num.leftShift((uint32_t)(-E)); if (den > num) { E--; num.leftShift(1); } }
+
+		if (E > 1023) return INFINITY;
+		else if (E < -1022) return -INFINITY;
+
+		uint64_t signbit = sign < 0 ? ((uint64_t)1) << 63 : 0;
+		uint64_t exponent = ((uint64_t)(1023 + E)) << 52;
+		uint64_t mantissa = 0;
+
+		for (int i = 0; i < 53; i++) {
+			mantissa <<= 1;
+			if (num >= den) {
+				mantissa |= 1;
+				num = num - den;
+			}
+			num <<= 1;
+		}
+		mantissa &= (~(((uint64_t)1) << 52));
+		mantissa |= exponent;
+		mantissa |= signbit;
+
+		void* ptr = &mantissa;
+
+		return *((double*)ptr);
+	}
+
+	inline bigfloat bigrational::get_bigfloat(uint32_t num_significant_bits) const {
+		if (sign == 0) return 0.0;
+
+		bignatural num = numerator;
+		bignatural den = denominator;
+		int32_t E = (int32_t)num.getNumSignificantBits() - (int32_t)den.getNumSignificantBits();
+		if (E > 0) { den.leftShift((uint32_t)E); if (den > num) { E--; den >>= 1; } }
+		else if (E <= 0) { num.leftShift((uint32_t)(-E)); if (den > num) { E--; num.leftShift(1); } }
+
+		bignatural mantissa;
+
+		for (uint32_t i = 0; i <= num_significant_bits; i++) {
+			mantissa <<= 1;
+			if (num >= den) {
+				mantissa |= 1ULL;
+				num = num - den;
+			}
+			num <<= 1;
+		}
+
+		return bigfloat(mantissa, E - (int32_t)num_significant_bits, sign);
+	}
+
+	inline std::string bigrational::get_dec_str() const {
+		std::string st;
+		if (sign < 0) st = "-";
+		else if (sign == 0) return "0";
+		st += numerator.get_dec_str();
+		const std::string dens = denominator.get_dec_str();
+		if (dens != "1") {
+			st += "/";
+			st += dens;
+		}
+		return st;
+	}
+
+	inline std::string bigrational::get_str() const {
+		std::string st;
+		if (sign < 0) st = "-";
+		else if (sign == 0) return "0";
+		st += numerator.get_str();
 		st += "/";
-		st += dens;
+		st += denominator.get_str();
+		return st;
 	}
-	return st;
-}
-
-inline std::string bigrational::get_str() const {
-	std::string st;
-	if (sign < 0) st = "-";
-	else if (sign == 0) return "0";
-	st += numerator.get_str();
-	st += "/";
-	st += denominator.get_str();
-	return st;
-}
 
 #endif //USE_GNU_GMP_CLASSES
+} // namespace nfg
