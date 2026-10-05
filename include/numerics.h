@@ -68,8 +68,13 @@
 #endif
 
 // Set SIMD support
+// MSVC never defines __SSE2__, although SSE2 is part of the x64 baseline. Without the
+// _M_X64 test, an MSVC translation unit gets the scalar interval_number unless it is
+// compiled with /arch:AVX2, so two libraries built with and without that flag disagree on
+// interval_number's layout (the two store the bounds in opposite order) and cannot be
+// linked into one binary. ARM64EC also defines _M_X64; it is excluded.
 #if INTPTR_MAX == INT64_MAX
-#	ifdef __SSE2__
+#	if defined(__SSE2__) || (defined(_M_X64) && !defined(_M_ARM64EC))
 #		define USE_SIMD_INSTRUCTIONS
 #	endif
 #	ifdef __AVX2__
