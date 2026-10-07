@@ -210,6 +210,10 @@ namespace NFG {
 
 		uint32_t blockSize() const;
 
+		// If every block is free, return the memory the pool grew into and go back to its
+		// initial capacity. A no-op while any block is in use. Returns the bytes released.
+		size_t trim();
+
 	protected:
 		void addDataBlockArray(uint32_t tot_size, uint32_t extended_block_size, uint32_t** fs);
 		void doubleDataArray();
@@ -240,6 +244,9 @@ namespace NFG {
 
 		void* alloc(uint32_t num_bytes);
 		void release(void* s);
+
+		// Trim every size class (see IN_pool::trim). Returns the bytes released.
+		size_t trim();
 
 	protected:
 		IN_pool& pickPoolFromSize(uint32_t bs);
@@ -834,6 +841,12 @@ namespace NFG {
 		// Count number of zeroes on the right (least significant binary digits)
 		uint32_t countEndingZeroes() const;
 
+		// Release what the calling thread's bignatural pool grew into, if no bignatural
+		// allocated from it is still alive. The pool never shrinks on its own, so without this
+		// the high-water mark of an exact computation stays allocated for the life of the
+		// thread. Returns the bytes released.
+		static size_t trimMemoryPool() { return nfgMemoryPool.trim(); }
+
 	protected:
 		uint64_t& back();
 
@@ -1356,6 +1369,23 @@ namespace NFG {
 		return block_size;
 	}
 
+	inline size_t IN_pool::trim() {
+		if (last != size || data.size() <= 1) return 0;
+		// Each doubling appended an array as large as the whole pool was, so the first array
+		// holds size >> (#arrays - 1) blocks: the initial capacity.
+		const uint32_t init_size = size >> (data.size() - 1);
+		const uint32_t extended_block_size = block_size + 1;
+		const size_t released = sizeof(uint32_t) * size_t(extended_block_size) * (size - init_size);
+		free(stack);
+		for (uint32_t* p : data) free(p);
+		data.clear();
+		size = init_size;
+		last = init_size;
+		stack = (uint32_t**)malloc(sizeof(uint32_t*) * size);
+		addDataBlockArray(size * extended_block_size, extended_block_size, stack);
+		return released;
+	}
+
 	inline IN_pool::IN_pool(IN_pool&& p) noexcept
 		: data(p.data), stack(p.stack), last(p.last), size(p.size), block_size(p.block_size) {
 		p.stack = nullptr;
@@ -1375,6 +1405,12 @@ namespace NFG {
 			bs <<= 1;
 			IN_pools.push_back(IN_pool(init_capacity, bs));
 		}
+	}
+
+	inline size_t MultiPool::trim() {
+		size_t released = 0;
+		for (IN_pool& p : IN_pools) released += p.trim();
+		return released;
 	}
 
 	inline void* MultiPool::alloc(uint32_t num_bytes) {
