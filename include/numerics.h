@@ -130,10 +130,12 @@ namespace NFG {
 	// Deprecated. This function exists for back-compatibility only.
 	inline void initFPU() {}
 
+	// Report an unrecoverable error and terminate. The exit status is a failure, so that a
+	// test runner (ctest judges a test by its exit status) or a calling script sees it as one.
 	inline void ip_error(const char* msg)
 	{
 		std::cerr << msg;
-		exit(0);
+		exit(EXIT_FAILURE);
 	}
 
 	int nfg_count_lz(uint32_t v);
