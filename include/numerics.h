@@ -59,6 +59,7 @@
 #include <string>
 #include <cstring>
 #include <algorithm>
+#include <stdexcept>
 
 #pragma intrinsic(fabs)
 
@@ -130,13 +131,23 @@ namespace NFG {
 	// Deprecated. This function exists for back-compatibility only.
 	inline void initFPU() {}
 
-	// Report an unrecoverable error and terminate. The exit status is a failure, so that a
-	// test runner (ctest judges a test by its exit status) or a calling script sees it as one.
+	// Report an unrecoverable error. By default the message goes to stderr and the process
+	// terminates with a failure status, so that a test runner (ctest judges a test by its exit
+	// status) or a calling script sees it as one. A host that cannot afford to lose its process
+	// -- a Python extension module, a server, a GUI -- defines NFG_IP_ERROR_THROWS and gets a
+	// std::runtime_error carrying the message instead, to be caught at its API boundary.
+#ifdef NFG_IP_ERROR_THROWS
+	inline void ip_error(const char* msg)
+	{
+		throw std::runtime_error(msg);
+	}
+#else
 	inline void ip_error(const char* msg)
 	{
 		std::cerr << msg;
 		exit(EXIT_FAILURE);
 	}
+#endif
 
 	int nfg_count_lz(uint32_t v);
 	int nfg_count_rz(uint32_t v);
