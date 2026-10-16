@@ -1,6 +1,7 @@
 #include "numerics.h"
 #include <chrono>
 
+using namespace NFG;
 typedef interval_number Interval;
 
 int main(int argc, char* argv[])
